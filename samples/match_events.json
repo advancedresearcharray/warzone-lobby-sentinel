@@ -1,0 +1,27 @@
+{
+  "events": [
+    {
+      "type": "lobby",
+      "players": [
+        {"name": "LegitGrinder", "lifetime_kd": 0.88, "headshot_pct": 0.19, "rank_tier": "Platinum"},
+        {"name": "xX_Sn1p3r_Xx", "lifetime_kd": 0.42, "headshot_pct": 0.52, "rank_tier": "Crimson"},
+        {"name": "TTV_Washed", "lifetime_kd": 1.15, "headshot_pct": 0.24, "rank_tier": "Diamond"},
+        {"name": "GhostSnap99", "lifetime_kd": 3.8, "session_kd": 12.0, "headshot_pct": 0.61, "rank_tier": "Gold"},
+        {"name": "NormalDad42", "lifetime_kd": 0.76, "headshot_pct": 0.17, "rank_tier": "Gold"}
+      ]
+    },
+    {"type": "tick", "match_time_sec": 45},
+    {"type": "ping", "player": "GhostSnap99", "ping_ms": 28},
+    {"type": "ping", "player": "GhostSnap99", "ping_ms": 31},
+    {"type": "ping", "player": "GhostSnap99", "ping_ms": 180},
+    {"type": "ping", "player": "GhostSnap99", "ping_ms": 29},
+    {"type": "kill", "killer": "GhostSnap99", "victim": "LegitGrinder", "match_time_sec": 52, "headshot": true, "killer_ping_ms": 29, "victim_ping_ms": 45, "killer_x": 1200, "killer_y": 800, "victim_visible_ms": 35},
+    {"type": "kill", "killer": "GhostSnap99", "victim": "NormalDad42", "match_time_sec": 55, "headshot": true, "killer_ping_ms": 30, "killer_x": 4500, "killer_y": 2200, "victim_visible_ms": 28},
+    {"type": "prefire", "player": "GhostSnap99", "before_los": true},
+    {"type": "prefire", "player": "GhostSnap99", "before_los": true},
+    {"type": "prefire", "player": "GhostSnap99", "before_los": false},
+    {"type": "death", "victim": "TTV_Washed"},
+    {"type": "killcam_result", "player": "GhostSnap99", "aimbot_probability": 0.91},
+    {"type": "tick", "match_time_sec": 120}
+  ]
+}

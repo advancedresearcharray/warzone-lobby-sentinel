@@ -1,0 +1,2 @@
+# Autonomous Xbox mode uses stdlib only.
+# Optional for manual killcam analysis: opencv-python-headless numpy

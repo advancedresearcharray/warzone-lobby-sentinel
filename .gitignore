@@ -1,0 +1,23 @@
+# Secrets and runtime state
+*.token
+*.env
+!*.env.example
+xbox_notify.json
+ai-learning.json
+/var/lib/
+
+# Rust build artifacts
+rust/target/
+bin/
+*.d
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+*.swp
+*~

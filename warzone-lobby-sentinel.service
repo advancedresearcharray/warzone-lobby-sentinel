@@ -1,0 +1,19 @@
+[Unit]
+Description=Warzone Lobby Sentinel — autonomous Xbox lobby integrity (Rust)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/warzone-lobby-sentinel
+EnvironmentFile=-/etc/default/warzone-lobby-sentinel
+Environment=WZ_INSTALL_ROOT=/opt/warzone-lobby-sentinel
+ExecStart=/opt/warzone-lobby-sentinel/tools/run_automated.sh
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

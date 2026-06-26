@@ -1,0 +1,92 @@
+{
+  "rules": [
+    {
+      "id": "warzone-game",
+      "match": [
+        "demonware.net",
+        "demonware.pro",
+        "prod.demonware",
+        "telescope-api.callofduty.com"
+      ],
+      "cidrs": ["185.33.0.0/16", "185.34.0.0/16"],
+      "tier": "critical"
+    },
+    {
+      "id": "matchmaking",
+      "match": ["playfabapi.com", "playfab.com"],
+      "cidrs": ["52.239.0.0/16", "52.238.0.0/16", "34.0.0.0/8", "35.0.0.0/8"],
+      "tier": "critical"
+    },
+    {
+      "id": "game-assets",
+      "match": [
+        "cod-assets.cdn.callofduty.com",
+        "callofduty.com",
+        "activision.com",
+        "akamaitechnologies.com",
+        "akamai.net",
+        "akamaiedge.net",
+        "edgekey.net",
+        "deploy.static.akamaitechnologies.com"
+      ],
+      "cidrs": [
+        "199.46.0.0/16",
+        "23.192.0.0/10",
+        "23.64.0.0/10",
+        "2.16.0.0/13"
+      ],
+      "matchExclude": ["ingest.", "datax."],
+      "tier": "high"
+    },
+    {
+      "id": "telemetry",
+      "match": [
+        "ingest.datax.activision.com",
+        "events.data.microsoft.com",
+        "v10.events",
+        "v20.events"
+      ],
+      "tier": "low"
+    },
+    {
+      "id": "xbox-live",
+      "match": [
+        "xboxlive.com",
+        "xbox.com",
+        "mp.microsoft.com",
+        "userpresence.xboxlive.com",
+        "multiplayeractivity.xboxlive.com"
+      ],
+      "cidrs": [
+        "20.0.0.0/8",
+        "4.0.0.0/8",
+        "40.64.0.0/10",
+        "104.64.0.0/10",
+        "13.64.0.0/11"
+      ],
+      "tier": "critical"
+    },
+    {
+      "id": "azure-qos",
+      "match": ["cloudapp.azure.com", "mpsqosprod"],
+      "cidrs": ["52.160.0.0/11"],
+      "tier": "high"
+    },
+    {
+      "id": "notifications",
+      "match": ["wns.windows.com", "notify.windows.com"],
+      "tier": "normal"
+    },
+    {
+      "id": "game-peer",
+      "match": [
+        "vultrusercontent.com",
+        "linodeusercontent.com",
+        "your-server.de",
+        "hinet.net"
+      ],
+      "cidrs": ["66.42.0.0/16", "155.138.0.0/16"],
+      "tier": "normal"
+    }
+  ]
+}

@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Warzone Lobby Sentinel</title>
+  <style>
+    :root {
+      --bg: #0b0f14;
+      --panel: #121820;
+      --border: #1e2a38;
+      --text: #e8eef5;
+      --muted: #8b9cb0;
+      --accent: #3b82f6;
+      --clean: #22c55e;
+      --possible: #f59e0b;
+      --likely: #ef4444;
+      --critical: #dc2626;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+      min-height: 100vh;
+    }
+    header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      align-items: center;
+      justify-content: space-between;
+      background: #0d1219;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; letter-spacing: 0.02em; }
+    .meta { font-size: 0.8rem; color: var(--muted); }
+    .live { display: inline-flex; align-items: center; gap: 0.35rem; }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--clean);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse { 50% { opacity: 0.45; } }
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 1rem;
+      display: grid;
+      gap: 1rem;
+    }
+    .grid { display: grid; gap: 1rem; }
+    @media (min-width: 800px) {
+      .grid-2 { grid-template-columns: 1fr 1fr; }
+      .grid-3 { grid-template-columns: repeat(3, 1fr); }
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+    }
+    .card h2 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin-bottom: 0.65rem;
+    }
+    .verdict {
+      text-align: center;
+      padding: 1.25rem 1rem;
+    }
+    .verdict-label {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+    }
+    .verdict.CLEAN .verdict-label { color: var(--clean); }
+    .verdict.POSSIBLE .verdict-label { color: var(--possible); }
+    .verdict.LIKELY .verdict-label, .verdict.USER_BAD .verdict-label { color: var(--likely); }
+    .verdict-score { font-size: 1.1rem; color: var(--muted); margin-top: 0.25rem; }
+    .rec { margin-top: 0.75rem; font-size: 0.95rem; }
+    .stat {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.35rem 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.9rem;
+    }
+    .stat:last-child { border-bottom: none; }
+    .stat span:last-child { font-variant-numeric: tabular-nums; }
+    .warn { color: var(--possible); }
+    .bad { color: var(--likely); }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+    button {
+      border: none;
+      border-radius: 8px;
+      padding: 0.65rem 1rem;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    button:disabled { opacity: 0.45; cursor: wait; }
+    button:hover:not(:disabled) { opacity: 0.88; }
+    .btn-primary { background: var(--accent); color: #fff; }
+    .btn-danger { background: var(--likely); color: #fff; }
+    .btn-ghost { background: #1a2433; color: var(--text); border: 1px solid var(--border); }
+    .btn-success { background: #166534; color: #fff; }
+    .btn-kicked { background: #c2410c; color: #fff; }
+    ul.reasons { list-style: none; font-size: 0.88rem; }
+    ul.reasons li {
+      padding: 0.4rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+    ul.reasons li:last-child { border-bottom: none; }
+    .tag {
+      display: inline-block;
+      font-size: 0.72rem;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+      background: #1a2433;
+      color: var(--muted);
+      margin-right: 0.35rem;
+    }
+    .tag.on { background: #1e3a5f; color: #93c5fd; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.78rem;
+    }
+    th, td {
+      text-align: left;
+      padding: 0.35rem 0.4rem;
+      border-bottom: 1px solid var(--border);
+    }
+    th { color: var(--muted); font-weight: 500; }
+    .spark {
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 36px;
+      margin-top: 0.5rem;
+    }
+    .spark i {
+      flex: 1;
+      background: var(--accent);
+      border-radius: 2px 2px 0 0;
+      min-height: 2px;
+      opacity: 0.75;
+    }
+    #toast {
+      position: fixed;
+      bottom: 1rem;
+      right: 1rem;
+      background: #1a2433;
+      border: 1px solid var(--border);
+      padding: 0.75rem 1rem;
+      border-radius: 8px;
+      font-size: 0.85rem;
+      opacity: 0;
+      transition: opacity 0.2s;
+      pointer-events: none;
+      max-width: 320px;
+    }
+    #toast.show { opacity: 1; }
+    .phase-badge {
+      display: inline-block;
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      background: #1a2433;
+    }
+    .phase-badge.in-match { background: #7f1d1d; color: #fecaca; }
+    .phase-badge.matchmaking { background: #713f12; color: #fde68a; }
+    .phase-badge.post-match, .phase-badge.background { background: #1e3a2f; color: #86efac; }
+    .ai-summary { font-size: 0.95rem; line-height: 1.5; margin-bottom: 0.75rem; color: var(--text); }
+    .rec-high { color: var(--likely); }
+    .rec-medium { color: var(--possible); }
+    .traffic-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+    .traffic-toolbar .tag { cursor: pointer; border: 1px solid transparent; }
+    .traffic-toolbar .tag.active { border-color: var(--accent); color: #93c5fd; }
+    .traffic-summary { margin-bottom: 0.75rem; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.72rem; }
+    .dir-out { color: #93c5fd; }
+    .dir-in { color: #86efac; }
+    .traffic-sub { margin-top: 1rem; }
+    .cheater-answer {
+      font-size: 1.15rem;
+      font-weight: 600;
+      margin: 0.5rem 0 0.25rem;
+      line-height: 1.35;
+    }
+    .cheater-answer.yes { color: var(--likely); }
+    .cheater-answer.maybe { color: var(--possible); }
+    .cheater-answer.no { color: var(--clean); }
+    .defense-note {
+      font-size: 0.88rem;
+      color: var(--muted);
+      margin-top: 0.5rem;
+      padding-top: 0.5rem;
+      border-top: 1px solid var(--border);
+    }
+    .verdict-reasons {
+      text-align: left;
+      margin-top: 0.75rem;
+      font-size: 0.85rem;
+    }
+    .verdict-reasons li {
+      padding: 0.25rem 0;
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Warzone Lobby Sentinel</h1>
+      <div class="meta live"><span class="dot"></span> <span id="pollMeta">Connecting…</span></div>
+    </div>
+    <div class="meta">
+      <a href="#" id="fwLink" style="color:var(--accent);text-decoration:none">array-firewall ↗</a>
+      · <span id="sourceMeta"></span>
+    </div>
+  </header>
+
+  <main>
+    <section class="card verdict CLEAN" id="verdictCard">
+      <div class="verdict-label" id="verdictLabel">—</div>
+      <div class="cheater-answer" id="cheaterAnswer">Analyzing lobby…</div>
+      <div class="verdict-score" id="verdictScore"></div>
+      <ul class="verdict-reasons" id="verdictReasons"></ul>
+      <div class="defense-note" id="defenseStatus"></div>
+      <div class="rec" id="recommendation"></div>
+    </section>
+
+    <section class="card" id="aiCard">
+      <h2>AI Advisor</h2>
+      <p id="aiSummary" class="ai-summary">Analyzing…</p>
+      <div class="grid grid-3" style="margin-bottom:0.75rem">
+        <div class="stat"><span>Bad probability</span><span id="aiProb">—</span></div>
+        <div class="stat"><span>Trend</span><span id="aiTrend">—</span></div>
+        <div class="stat"><span>AI calibration</span><span id="aiCalib">—</span></div>
+      </div>
+      <div class="spark" id="scoreSpark" title="Score history"></div>
+      <div class="grid grid-2" style="margin-top:1rem">
+        <div>
+          <h2>Score breakdown</h2>
+          <ul class="reasons" id="aiBreakdown"></ul>
+        </div>
+        <div>
+          <h2>AI recommendations</h2>
+          <ul class="reasons" id="aiRecs"></ul>
+        </div>
+      </div>
+      <h2 style="margin-top:1rem">Similar past lobbies (32D fold)</h2>
+      <ul class="reasons" id="aiSimilar"></ul>
+    </section>
+
+    <section class="card">
+      <h2>Actions</h2>
+      <div class="actions">
+        <button class="btn-primary" id="btnInMatch">I am in a match</button>
+        <button class="btn-danger" id="btnBad">Mark cheater lobby</button>
+        <button class="btn-kicked" id="btnKicked" title="Use when a hacker kicked you from the lobby">Kicked from lobby</button>
+        <button class="btn-ghost" id="btnReleaseDefenses" title="Stop buffer/flood tuning if gameplay is glitching">Stop defenses (fix glitching)</button>
+        <button class="btn-success" id="btnClean" title="Only use when this lobby had no cheaters">Good lobby (no cheaters)</button>
+        <button class="btn-ghost" id="btnLeft">Left lobby</button>
+      </div>
+    </section>
+
+    <div class="grid grid-3">
+      <section class="card">
+        <h2>Phase</h2>
+        <div class="stat"><span>Detected</span><span id="phase">—</span></div>
+        <div class="stat"><span>Manual override</span><span id="manual">—</span></div>
+        <div class="stat"><span>Level</span><span id="level">—</span></div>
+        <div class="stat"><span>Game</span><span id="game">—</span></div>
+      </section>
+      <section class="card">
+        <h2>Latency</h2>
+        <div class="stat"><span>WAN ping</span><span id="wanLat">—</span></div>
+        <div class="stat"><span>WAN jitter</span><span id="wanJit">—</span></div>
+        <div class="stat"><span>Game servers</span><span id="srvLat">—</span></div>
+        <div class="stat"><span>Server jitter</span><span id="srvJit">—</span></div>
+        <div class="spark" id="wanSpark"></div>
+      </section>
+      <section class="card">
+        <h2>Connections</h2>
+        <div class="stat"><span>Active now</span><span id="conns">—</span></div>
+        <div class="stat"><span>Session peak</span><span id="peakConns">—</span></div>
+        <div class="stat"><span>Learned MM baseline</span><span id="mmBase">—</span></div>
+        <div class="spark" id="connSpark"></div>
+      </section>
+    </div>
+
+    <div class="grid grid-2">
+      <section class="card">
+        <h2>Problems &amp; signals</h2>
+        <ul class="reasons" id="anomalies"></ul>
+      </section>
+      <section class="card">
+        <h2>Verdict reasons</h2>
+        <ul class="reasons" id="reasons"></ul>
+      </section>
+    </div>
+
+    <div class="grid grid-2">
+      <section class="card">
+        <h2>Network guard</h2>
+        <div class="stat"><span>Mode</span><span id="guardMode">—</span></div>
+        <div class="stat"><span>Desync profile</span><span id="guardEngage">—</span></div>
+        <div class="stat"><span>Flood guard</span><span id="floodGuard">—</span></div>
+        <div class="stat"><span>Last auto alert</span><span id="lastAlert">—</span></div>
+      </section>
+      <section class="card">
+        <h2>Learning</h2>
+        <div class="stat"><span>Active session worst</span><span id="sessWorst">—</span></div>
+        <div class="stat"><span>Feedback count</span><span id="fbCount">—</span></div>
+        <div class="stat"><span>AI profiles</span><span id="learnProfiles">—</span></div>
+        <ul class="reasons" id="patterns"></ul>
+      </section>
+    </div>
+
+    <section class="card">
+      <h2>Packet capture &amp; cheat inspection</h2>
+      <p id="packetSummary" class="ai-summary">Waiting for tcpdump capture…</p>
+      <div class="grid grid-3" style="margin-bottom:0.75rem">
+        <div class="stat"><span>Packet verdict</span><span id="packetVerdict">—</span></div>
+        <div class="stat"><span>Packet score</span><span id="packetScore">—</span></div>
+        <div class="stat"><span>Captured</span><span id="packetCaptured">—</span></div>
+      </div>
+      <div class="grid grid-3" style="margin-bottom:0.75rem">
+        <div class="stat"><span>Inbound packets</span><span id="pktIn">—</span></div>
+        <div class="stat"><span>Tiny inbound</span><span id="pktTiny">—</span></div>
+        <div class="stat"><span>Peer tiny inbound</span><span id="pktPeerTiny">—</span></div>
+        <div class="stat"><span>Suspicious peers</span><span id="pktPeerCount">—</span></div>
+      </div>
+      <h2>Suspicious game peers</h2>
+      <ul class="reasons" id="suspiciousPeers"></ul>
+      <div class="actions" style="margin-bottom:0.75rem">
+        <button class="btn-primary" id="btnDeepCapture">Deep capture now</button>
+      </div>
+      <h2>Packet alerts</h2>
+      <ul class="reasons" id="packetAlerts"></ul>
+      <h2 class="traffic-sub">Captured packets</h2>
+      <table class="mono">
+        <thead><tr><th>Dir</th><th>Proto</th><th>Remote</th><th>Port</th><th>Len</th><th>Flags</th></tr></thead>
+        <tbody id="packetBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Inbound cheat analysis</h2>
+      <p id="inboundSummary" class="ai-summary">Inspecting incoming packets…</p>
+      <div class="grid grid-3" style="margin-bottom:0.75rem">
+        <div class="stat"><span>Inbound verdict</span><span id="inboundVerdict">—</span></div>
+        <div class="stat"><span>Inbound score</span><span id="inboundScore">—</span></div>
+        <div class="stat"><span>Inbound Mbps</span><span id="inboundMbps">—</span></div>
+      </div>
+      <div class="grid grid-3" style="margin-bottom:0.75rem">
+        <div class="stat"><span>Download (flows)</span><span id="inboundDl">—</span></div>
+        <div class="stat"><span>DL/UL ratio</span><span id="inboundRatio">—</span></div>
+        <div class="stat"><span>Unknown inbound conns</span><span id="inboundUnknown">—</span></div>
+      </div>
+      <h2>Inbound alerts</h2>
+      <ul class="reasons" id="inboundAlerts"></ul>
+    </section>
+
+    <section class="card">
+      <h2>Traffic inspector</h2>
+      <div class="traffic-toolbar">
+        <span class="tag active" data-traffic-dir="out">Outbound</span>
+        <span class="tag" data-traffic-dir="in">Inbound</span>
+        <span class="tag" data-traffic-dir="all">All</span>
+        <span class="meta" id="trafficMeta"></span>
+      </div>
+      <div class="grid grid-3 traffic-summary">
+        <div class="stat"><span>Connections</span><span id="trConns">—</span></div>
+        <div class="stat"><span>Upload (flows)</span><span id="trUpload">—</span></div>
+        <div class="stat"><span>Download (flows)</span><span id="trDownload">—</span></div>
+      </div>
+      <div id="trRoles" style="margin-bottom:0.75rem"></div>
+      <h2 class="traffic-sub">Connections</h2>
+      <table class="mono">
+        <thead><tr><th>Dir</th><th>Host</th><th>Role</th><th>Remote</th><th>Port</th><th>Proto</th><th>Latency</th></tr></thead>
+        <tbody id="trConnsBody"></tbody>
+      </table>
+      <h2 class="traffic-sub">Recent flows</h2>
+      <table class="mono">
+        <thead><tr><th>Dir</th><th>Host</th><th>Role</th><th>Upload</th><th>Download</th><th>Category</th></tr></thead>
+        <tbody id="trFlowsBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Server roles (DNS / flows)</h2>
+      <div id="roles" style="margin-bottom:0.75rem"></div>
+      <table>
+        <thead><tr><th>Host</th><th>Role</th><th>Latency</th></tr></thead>
+        <tbody id="hosts"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <div id="toast"></div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    let busy = false;
+    let trafficDir = 'out';
+
+    function bytes(v) {
+      if (v == null || v === '') return '—';
+      const n = Number(v);
+      if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+      if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+      return n + ' B';
+    }
+
+    function renderTraffic(tr) {
+      if (!tr) return;
+      const sum = tr.summary || {};
+      $('trConns').textContent = (tr.connections || []).length
+        + (sum.connections_total != null ? ' / ' + sum.connections_total : '');
+      $('trUpload').textContent = bytes(sum.xbox_upload_bytes ?? sum.outbound_upload_bytes ?? sum.sample_bytes_out);
+      $('trDownload').textContent = bytes(sum.xbox_download_bytes ?? sum.outbound_download_bytes ?? sum.sample_bytes_in);
+      const win = sum.sample_window_sec;
+      $('trafficMeta').textContent = win != null
+        ? `${tr.direction || trafficDir} · ${win}s sample window`
+        : (tr.direction || trafficDir);
+
+      $('trRoles').innerHTML = (tr.by_role || [])
+        .map(r => `<span class="tag">${r.role}: ${r.count}</span>`)
+        .join('') || '<span class="muted">No connections</span>';
+
+      const cbody = $('trConnsBody');
+      cbody.innerHTML = '';
+      (tr.connections || []).slice(0, 24).forEach(c => {
+        const trEl = document.createElement('tr');
+        const dir = c.direction || 'out';
+        trEl.innerHTML =
+          `<td class="dir-${dir}">${dir}</td>` +
+          `<td>${c.hostname || c.ip || '—'}</td>` +
+          `<td>${c.role || '—'}</td>` +
+          `<td>${c.remote || '—'}</td>` +
+          `<td>${c.port ?? '—'}</td>` +
+          `<td>${c.proto || '—'}</td>` +
+          `<td>${ms(c.latency_ms)}</td>`;
+        cbody.appendChild(trEl);
+      });
+      if (!(tr.connections || []).length) {
+        cbody.innerHTML = '<tr><td colspan="7">No connections in this direction</td></tr>';
+      }
+
+      const fbody = $('trFlowsBody');
+      fbody.innerHTML = '';
+      (tr.flows || []).slice(0, 16).forEach(f => {
+        const trEl = document.createElement('tr');
+        const dir = f.direction || 'out';
+        trEl.innerHTML =
+          `<td class="dir-${dir}">${dir}</td>` +
+          `<td>${f.hostname || f.remote || '—'}</td>` +
+          `<td>${f.role || '—'}</td>` +
+          `<td>${bytes(f.upload_bytes)}</td>` +
+          `<td>${bytes(f.download_bytes)}</td>` +
+          `<td>${f.category || '—'}</td>`;
+        fbody.appendChild(trEl);
+      });
+      if (!(tr.flows || []).length) {
+        fbody.innerHTML = '<tr><td colspan="6">No recent flows</td></tr>';
+      }
+    }
+
+    async function loadTraffic(dir) {
+      trafficDir = dir || trafficDir;
+      document.querySelectorAll('[data-traffic-dir]').forEach(el => {
+        el.classList.toggle('active', el.dataset.trafficDir === trafficDir);
+      });
+      try {
+        const r = await fetch('/v1/traffic?dir=' + encodeURIComponent(trafficDir));
+        const j = await r.json();
+        renderTraffic(j.traffic);
+      } catch (e) {
+        $('trafficMeta').textContent = 'Traffic unavailable';
+      }
+    }
+
+    function toast(msg) {
+      const t = $('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2800);
+    }
+
+    function ms(v) {
+      if (v == null || v === '') return '—';
+      return Number(v).toFixed(1) + ' ms';
+    }
+
+    function spark(el, arr) {
+      el.innerHTML = '';
+      if (!arr || !arr.length) return;
+      const max = Math.max(...arr, 1);
+      arr.slice().reverse().forEach(v => {
+        const bar = document.createElement('i');
+        bar.style.height = Math.max(4, (v / max) * 100) + '%';
+        el.appendChild(bar);
+      });
+    }
+
+    function list(el, items, empty) {
+      el.innerHTML = '';
+      (items && items.length ? items : [empty || 'None']).forEach(t => {
+        const li = document.createElement('li');
+        li.textContent = t;
+        el.appendChild(li);
+      });
+    }
+
+    async function action(url, body) {
+      if (busy) return;
+      busy = true;
+      document.querySelectorAll('button').forEach(b => b.disabled = true);
+      try {
+        const opts = body != null
+          ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+          : { method: 'POST' };
+        const r = await fetch(url, opts);
+        const j = await r.json();
+        toast(j.message || j.ok ? 'Done' : 'Failed');
+        await refresh();
+      } catch (e) {
+        toast('Request failed');
+      } finally {
+        busy = false;
+        document.querySelectorAll('button').forEach(b => b.disabled = false);
+      }
+    }
+
+    function render(d) {
+      const sess = d.session || {};
+      const cl = sess.cheater_lobby || {};
+      const ca = sess.cheater_answer || {};
+      const label = ca.label || cl.label || 'CLEAN';
+      const conf = ca.confidence != null ? ca.confidence : (cl.confidence != null ? cl.confidence : 0);
+      const card = $('verdictCard');
+      card.className = 'card verdict ' + label;
+      $('verdictLabel').textContent = ca.headline || label;
+      const ansEl = $('cheaterAnswer');
+      ansEl.textContent = ca.plain || 'Waiting for lobby data…';
+      ansEl.className = 'cheater-answer ' + (ca.is_cheater_lobby || 'no');
+      $('verdictScore').textContent = conf ? conf.toFixed(0) + '% confidence' : '';
+      const reasons = ca.reasons || cl.reasons || [];
+      $('verdictReasons').innerHTML = reasons.length
+        ? reasons.map(r => `<li>${r}</li>`).join('')
+        : '<li>No cheater signals</li>';
+      $('defenseStatus').textContent = sess.defense_status
+        || (sess.network_guard && sess.network_guard.mitigation)
+        || '';
+      $('recommendation').textContent = sess.recommendation || '';
+
+      const ai = sess.ai || {};
+      $('aiSummary').textContent = ai.summary || 'Waiting for gaming session…';
+      const pred = ai.prediction || {};
+      $('aiProb').textContent = pred.estimated_bad_probability != null
+        ? pred.estimated_bad_probability + '%' : '—';
+      $('aiProb').className = (pred.estimated_bad_probability || 0) >= 50 ? 'bad' : '';
+      const trendEl = $('aiTrend');
+      trendEl.textContent = pred.trend || '—';
+      trendEl.className = pred.early_warning ? 'warn' : (pred.trend === 'worsening' ? 'bad' : '');
+      const cal = ai.calibration || {};
+      $('aiCalib').textContent = cal.precision_pct != null
+        ? `~${cal.precision_pct}% precision · ${cal.false_alarms || 0} false alarms`
+        : `${cal.good_marks || 0} clean / ${cal.bad_marks || 0} bad marks`;
+
+      const sources = (ai.score_breakdown || {}).sources || [];
+      $('aiBreakdown').innerHTML = sources.length
+        ? sources.map(s => `<li><strong>${s.label}</strong> (${s.contribution}%)<br><span style="color:var(--muted)">${(s.detail||[]).join(' · ')}</span></li>`).join('')
+        : '<li>No breakdown yet</li>';
+
+      const recs = ai.recommendations || [];
+      $('aiRecs').innerHTML = recs.length
+        ? recs.map(r => `<li><span class="tag">${r.priority}</span> ${r.text}</li>`).join('')
+        : '<li>No recommendations</li>';
+
+      const sim = ai.similar_lobbies || [];
+      $('aiSimilar').innerHTML = sim.length
+        ? sim.map(s => `<li>${Math.round((s.similarity||0)*100)}% match · <strong>${s.label}</strong> · ${s.conns} conns · ${s.age_sec}s ago</li>`).join('')
+        : '<li>No similar lobbies in memory yet — keep playing to build fingerprints</li>';
+
+      spark($('scoreSpark'), (ai.trajectory || {}).scores);
+
+      const verdictLabel = ca.label || cl.label || 'CLEAN';
+      const btnClean = $('btnClean');
+      const badVerdict = verdictLabel === 'LIKELY' || verdictLabel === 'POSSIBLE' || verdictLabel === 'USER_BAD';
+      btnClean.disabled = badVerdict;
+      btnClean.title = badVerdict
+        ? 'Not for cheater lobbies — use Mark cheater lobby instead'
+        : 'Only when this lobby had no cheaters';
+
+      const phase = sess.phase || 'unknown';
+      $('phase').innerHTML = '<span class="phase-badge ' + phase + '">' + phase + '</span>';
+      $('manual').textContent = (d.scorer && d.scorer.manual_in_match) ? 'Yes — in-match forced' : 'No';
+      $('level').textContent = sess.level || '—';
+      $('game').textContent = sess.game || '—';
+
+      const sc = d.scorer || {};
+      const tel = d.telemetry || {};
+      const wan = sc.wan_latency_ms ?? tel.wan?.latencyMs;
+      $('wanLat').textContent = ms(wan);
+      $('wanJit').textContent = ms(sc.wan_jitter_ms);
+      $('wanJit').className = sc.wan_jitter_ms >= 12 ? 'bad' : '';
+      $('srvLat').textContent = ms(sc.server_latency_ms);
+      $('srvJit').textContent = ms(sc.server_jitter_ms);
+      $('srvJit').className = sc.server_jitter_ms >= 14 ? 'bad' : '';
+
+      const conns = sc.conn_count ?? tel.connections?.count;
+      $('conns').textContent = conns != null ? conns : '—';
+      $('peakConns').textContent = sc.session_peak_conns || (d.learning?.active_session?.peak_conns) || '—';
+
+      const th = d.learning?.thresholds || {};
+      $('mmBase').textContent = th.conn_matchmaking_elevated
+        ? th.conn_matchmaking_elevated.toFixed(0) + ' / ' + th.conn_matchmaking_high.toFixed(0) + ' conns'
+        : '—';
+
+      spark($('wanSpark'), sc.wan_history);
+      spark($('connSpark'), sc.conn_history);
+
+      list($('anomalies'), sess.anomalies);
+      list($('reasons'), cl.reasons, 'No cheater signals');
+
+      const ng = sess.network_guard || d.network_guard || {};
+      $('guardMode').textContent = ng.mode || '—';
+      $('guardEngage').textContent = ng.engage ? 'Desync yes' : 'Desync no';
+      const fg = ng.flood_guard || {};
+      $('floodGuard').textContent = fg.active
+        ? (fg.level === 'shield'
+          ? ((ng.packet_shield && ng.packet_shield.peer_attack)
+            ? 'SHIELD — peer probe drop (VPS/tiny floods)'
+            : (ng.packet_shield && ng.packet_shield.non_game_drop)
+              ? 'SHIELD — strict (non-game ports dropped)'
+              : 'SHIELD — tiny packets (≤79B) dropped')
+          : fg.level === 'harden'
+          ? 'HARDEN — kick/flood mitigation'
+          : 'DEFEND — per-source limits')
+        : (ng.paused ? 'Paused' : (fg.engage ? 'Pending' : 'Off'));
+      const mit = ng.mitigation || '';
+      if (mit && mit !== 'Monitoring — defenses idle') {
+        $('guardMode').textContent = (ng.mode || '—') + ' · defending';
+      }
+      const la = d.last_auto_alert;
+      $('lastAlert').textContent = la && la.label
+        ? la.label + ' @ ' + new Date(la.at * 1000).toLocaleTimeString()
+        : 'None';
+
+      const active = d.learning?.active_session;
+      $('sessWorst').textContent = active
+        ? active.worst_verdict + ' (' + (active.worst_score != null ? active.worst_score.toFixed(0) : '—') + '%)'
+        : '—';
+      $('fbCount').textContent = d.learning?.feedback_count ?? '—';
+      const prof = d.learning?.profiles || {};
+      if (prof.good_samples != null || prof.bad_samples != null) {
+        $('learnProfiles').textContent =
+          `Good ${prof.good_samples ?? 0} · Bad ${prof.bad_samples ?? 0} · Marginal ${prof.marginal_samples ?? 0} · Feedback +${prof.good_feedback ?? 0}/-${prof.bad_feedback ?? 0}`;
+      }
+      list($('patterns'), d.learning?.patterns);
+
+      const inb = (sess.inbound_analysis || d.inbound_analysis || {});
+      const inbMetrics = inb.metrics || {};
+      const inbVerdict = inb.verdict || '—';
+      $('inboundSummary').textContent = inbVerdict === 'normal_inbound'
+        ? 'Incoming traffic looks normal for Warzone.'
+        : inbVerdict === 'suspicious_inbound'
+          ? 'Incoming traffic shows suspicious patterns — may indicate cheater lobby.'
+          : inbVerdict === 'likely_cheater_traffic'
+            ? 'Incoming traffic strongly matches cheater-lobby patterns.'
+            : (inb.alerts && inb.alerts[0]) || 'Waiting for gaming session…';
+      const iv = $('inboundVerdict');
+      iv.textContent = inbVerdict.replace(/_/g, ' ');
+      iv.className = inbVerdict.includes('likely') ? 'bad'
+        : inbVerdict.includes('suspicious') ? 'warn' : '';
+      $('inboundScore').textContent = inb.score != null ? inb.score.toFixed(0) + '%' : '—';
+      $('inboundMbps').textContent = inbMetrics.inbound_mbps != null
+        ? Number(inbMetrics.inbound_mbps).toFixed(1) + ' Mbps' : '—';
+      $('inboundDl').textContent = bytes(inbMetrics.xbox_download_bytes);
+      $('inboundRatio').textContent = inbMetrics.in_out_byte_ratio != null
+        ? Number(inbMetrics.in_out_byte_ratio).toFixed(1) + '×' : '—';
+      $('inboundUnknown').textContent = inbMetrics.unknown_inbound_connections != null
+        ? inbMetrics.unknown_inbound_connections : '—';
+      list($('inboundAlerts'), inb.alerts, 'No inbound cheat signals');
+
+      const pkt = (sess.packet_analysis || d.packet_analysis || {});
+      const pktMetrics = pkt.metrics || {};
+      const pktVerdict = pkt.verdict || '—';
+      $('packetSummary').textContent = pktVerdict === 'normal_packets'
+        ? 'Captured packets look normal for Warzone.'
+        : pktVerdict === 'suspicious_packets'
+          ? 'Packet patterns suspicious — possible cheater lobby traffic.'
+          : pktVerdict === 'likely_cheat_packets'
+            ? 'Packet capture strongly matches cheat-lobby behavior.'
+            : pktVerdict === 'no_capture'
+              ? 'Packet capture unavailable — Firewalla tcpdump may be skipped under memory pressure.'
+              : (pkt.alerts && pkt.alerts[0]) || 'Waiting for packet capture…';
+      const pv = $('packetVerdict');
+      pv.textContent = pktVerdict.replace(/_/g, ' ');
+      pv.className = pktVerdict.includes('likely') ? 'bad'
+        : pktVerdict.includes('suspicious') ? 'warn' : '';
+      $('packetScore').textContent = pkt.score != null ? pkt.score.toFixed(0) + '%' : '—';
+      $('packetCaptured').textContent = pktMetrics.records_in_snapshot != null
+        ? pktMetrics.records_in_snapshot + ' / ' + (pktMetrics.total || '—')
+        : (pktMetrics.total ?? '—');
+      $('pktIn').textContent = pktMetrics.inbound != null ? pktMetrics.inbound : '—';
+      $('pktTiny').textContent = pktMetrics.tiny_inbound != null ? pktMetrics.tiny_inbound : '—';
+      $('pktPeerTiny').textContent = pktMetrics.peer_tiny_inbound != null ? pktMetrics.peer_tiny_inbound : '—';
+      const peers = pktMetrics.suspicious_peers || [];
+      $('pktPeerCount').textContent = Array.isArray(peers) ? peers.length : 0;
+      if (Array.isArray(peers) && peers.length) {
+        list($('suspiciousPeers'), peers.map(p => {
+          const label = p.label || p.vendor || 'game-peer';
+          const ip = p.ip || p.remote || '?';
+          const tiny = p.tiny_packets != null ? ` · ${p.tiny_packets} tiny` : '';
+          const burst = p.max_burst != null && p.max_burst >= 6 ? ` · burst×${p.max_burst}` : '';
+          return `${label} @ ${ip}${tiny}${burst}`;
+        }), 'No suspicious peers flagged');
+      } else if (Array.isArray(ng.packet_shield?.suspicious_peers) && ng.packet_shield.suspicious_peers.length) {
+        list($('suspiciousPeers'), ng.packet_shield.suspicious_peers.map(ip => `Suspicious peer @ ${ip}`), 'No suspicious peers flagged');
+      } else {
+        list($('suspiciousPeers'), [], 'No suspicious peers flagged');
+      }
+      list($('packetAlerts'), pkt.alerts, 'No packet-level cheat signals');
+      const pbody = $('packetBody');
+      pbody.innerHTML = '';
+      const pktRecs = (d.telemetry?.packetCapture?.records || []);
+      pktRecs.slice(0, 24).forEach(p => {
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          `<td class="dir-${p.dir || p.direction}">${p.dir || p.direction || '—'}</td>` +
+          `<td>${p.proto || '—'}</td>` +
+          `<td>${p.remote || '—'}</td>` +
+          `<td>${p.remotePort ?? '—'}</td>` +
+          `<td>${p.len ?? '—'}</td>` +
+          `<td>${p.flags || '—'}</td>`;
+        pbody.appendChild(tr);
+      });
+      if (!pktRecs.length) {
+        pbody.innerHTML = '<tr><td colspan="6">No packet records yet</td></tr>';
+      }
+
+      const roles = tel._enriched?.roleCounts || {};
+      $('roles').innerHTML = Object.entries(roles)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => '<span class="tag">' + k + ': ' + v + '</span>')
+        .join('') || '<span class="muted">No roles classified</span>';
+
+      const tbody = $('hosts');
+      tbody.innerHTML = '';
+      const hosts = new Map();
+      (tel._enriched?.classified || []).forEach(c => {
+        hosts.set(c.hostname, { role: c.roleId, lat: null });
+      });
+      (tel.connections?.items || []).forEach(c => {
+        const h = c.hostname || c.label || c.ip;
+        if (!h) return;
+        const prev = hosts.get(h) || {};
+        hosts.set(h, {
+          role: c.roleId || prev.role || 'unknown',
+          lat: c.latencyMs ?? prev.lat,
+        });
+      });
+      [...hosts.entries()].slice(0, 16).forEach(([h, info]) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td>' + h + '</td><td>' + info.role + '</td><td>' + ms(info.lat) + '</td>';
+        tbody.appendChild(tr);
+      });
+
+      const age = d.updated_at ? Math.round(Date.now() / 1000 - d.updated_at) : null;
+      $('pollMeta').textContent = age != null
+        ? 'Updated ' + age + 's ago · poll #' + (d.polls || 0)
+        : 'Waiting for data…';
+      $('sourceMeta').textContent = d.source || '';
+
+      renderTraffic(d.traffic);
+    }
+
+    async function refresh() {
+      try {
+        const r = await fetch('/v1/dashboard/data');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        try {
+          render(await r.json());
+        } catch (e) {
+          $('pollMeta').textContent = 'Render error — retrying…';
+          console.error('dashboard render failed', e);
+        }
+      } catch (e) {
+        $('pollMeta').textContent = 'Offline — retrying…';
+        console.error('dashboard refresh failed', e);
+      }
+    }
+
+    $('btnInMatch').onclick = () => action('/v1/session/match');
+    $('btnBad').onclick = () => action('/v1/feedback', { bad_lobby: true, note: 'dashboard' });
+    $('btnKicked').onclick = () => action('/v1/feedback/kicked');
+    $('btnReleaseDefenses').onclick = () => action('/v1/network-guard/release');
+    $('btnClean').onclick = () => action('/v1/feedback', { bad_lobby: false, note: 'dashboard clean' });
+    $('btnLeft').onclick = () => action('/v1/session/end');
+    $('btnDeepCapture').onclick = () => action('/v1/packets/capture');
+
+    document.querySelectorAll('[data-traffic-dir]').forEach(el => {
+      el.onclick = () => loadTraffic(el.dataset.trafficDir);
+    });
+
+    const fw = $('fwLink');
+    if (fw) fw.href = `http://${location.hostname}:8090/`;
+
+    refresh();
+    setInterval(refresh, 4000);
+  </script>
+</body>
+</html>
