@@ -108,6 +108,34 @@
     tr.vps-row td { background: rgba(239, 68, 68, 0.12); }
     tr.vps-row td:nth-child(3) { color: var(--likely); font-weight: 600; }
     .peer-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 0.65rem; align-items: center; }
+    .session-lookup {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+      align-items: center;
+      font-size: 0.82rem;
+    }
+    .session-lookup label { color: var(--muted); }
+    .session-lookup select {
+      background: #1a2433;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.35rem 0.5rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.78rem;
+      max-width: 14rem;
+    }
+    .view-badge {
+      display: inline-block;
+      font-size: 0.72rem;
+      font-weight: 600;
+      padding: 0.15rem 0.45rem;
+      border-radius: 999px;
+      background: #1e3a5f;
+      color: #93c5fd;
+    }
+    .view-badge.archive { background: #422006; color: #fde68a; }
     .peer-actions label { font-size: 0.82rem; color: var(--muted); display: inline-flex; align-items: center; gap: 0.35rem; }
     .actions {
       display: flex;
@@ -309,17 +337,33 @@
       <button class="tab" data-tab="defenses" role="tab">Defenses</button>
       <button class="tab" data-tab="traffic" role="tab">Traffic</button>
       <button class="tab" data-tab="connections" role="tab">Connections DB</button>
+      <button class="tab" data-tab="sessions" role="tab">Session logs</button>
       <button class="tab" data-tab="security" role="tab">Security</button>
     </div>
   </nav>
 
   <section class="card identical-panel" id="identicalPeersPanel">
-    <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.5rem;margin-bottom:0.5rem">
+    <div style="display:flex;flex-wrap:wrap;align-items:flex-start;justify-content:space-between;gap:0.75rem;margin-bottom:0.5rem">
       <div>
         <h2 style="margin:0">Inbound IPs — identical packet count</h2>
-        <p class="muted" style="margin:0.25rem 0 0;font-size:0.82rem">Session <span class="mono" id="sessionHex">—</span> · accumulates until you clear or leave lobby</p>
+        <p class="muted" style="margin:0.25rem 0 0;font-size:0.82rem">
+          Session <span class="mono" id="sessionHex">—</span>
+          · <span id="sessionViewBadge" class="view-badge">live</span>
+          · accumulates until you clear or leave lobby
+        </p>
       </div>
-      <button class="btn-ghost" id="btnClearPeers" type="button">Clear table (save snapshot)</button>
+      <div style="display:flex;flex-wrap:wrap;gap:0.65rem;align-items:center">
+        <div class="session-lookup">
+          <label for="sessionLookupSelect">Lookup</label>
+          <select id="sessionLookupSelect" title="Saved sessions on disk">
+            <option value="">— session —</option>
+          </select>
+          <button class="btn-ghost" id="btnSessionView" type="button">View</button>
+          <button class="btn-ghost" id="btnSessionDownload" type="button">Download JSON</button>
+          <button class="btn-ghost" id="btnSessionLive" type="button" style="display:none">Back to live</button>
+        </div>
+        <button class="btn-ghost" id="btnClearPeers" type="button">Clear table (save snapshot)</button>
+      </div>
     </div>
     <div class="peer-actions">
       <button class="btn-primary" id="btnShieldPeers" type="button">Shield selected</button>
@@ -553,6 +597,24 @@
     </section>
     </div>
 
+    <!-- ═══ SESSION LOGS ═══ -->
+    <div class="tab-panel" id="panel-sessions" role="tabpanel">
+    <section class="card">
+      <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.5rem;margin-bottom:0.65rem">
+        <div>
+          <h2 style="margin:0">Session logs</h2>
+          <p class="muted" style="margin:0.25rem 0 0;font-size:0.82rem">Saved game sessions under <span class="mono" id="sessionStoreDir">—</span></p>
+        </div>
+        <button class="btn-ghost" id="btnSessionsRefresh" type="button">Refresh list</button>
+      </div>
+      <p class="muted" id="sessionLogsMeta" style="margin:0 0 0.65rem;font-size:0.82rem">Loading…</p>
+      <table class="mono">
+        <thead><tr><th>Session</th><th>Phase</th><th>Started</th><th>Peers</th><th>Snapshots</th><th>Clears</th><th></th></tr></thead>
+        <tbody id="sessionLogsBody"></tbody>
+      </table>
+    </section>
+    </div>
+
     <!-- ═══ SECURITY ═══ -->
     <div class="tab-panel" id="panel-security" role="tabpanel">
     <section class="card">
@@ -624,6 +686,161 @@
     let trafficDir = 'all';
     const tabKey = 'wz-sentinel-tab';
     const selectedPeerIps = new Set();
+    let sessionViewMode = 'live';
+    let sessionLogsCache = [];
+    let sessionLogsLoaded = false;
+
+    function setPeerActionButtonsEnabled(on) {
+      ['btnShieldPeers', 'btnRestrictPeers', 'btnUnrestrictPeers', 'btnSelectVps', 'btnClearPeers', 'peerSelectAll'].forEach(id => {
+        const el = $(id);
+        if (el) el.disabled = !on;
+      });
+    }
+
+    function setSessionViewMode(mode) {
+      sessionViewMode = mode;
+      const badge = $('sessionViewBadge');
+      const liveBtn = $('btnSessionLive');
+      if (badge) {
+        badge.textContent = mode === 'archive' ? 'archive' : 'live';
+        badge.classList.toggle('archive', mode === 'archive');
+      }
+      if (liveBtn) liveBtn.style.display = mode === 'archive' ? '' : 'none';
+      setPeerActionButtonsEnabled(mode === 'live');
+    }
+
+    function sessionOptionLabel(s) {
+      const hex = s.session_hex || '';
+      const phase = s.phase || '?';
+      const peers = s.peer_count != null ? `${s.peer_count} peers` : '';
+      const snaps = s.snapshot_count != null && s.snapshot_count > 0 ? `${s.snapshot_count} snap` : '';
+      const tail = [peers, snaps].filter(Boolean).join(' · ');
+      return `${hex.slice(0, 8)}… · ${phase}${tail ? ' · ' + tail : ''}`;
+    }
+
+    function populateSessionLookupSelect(sessions, liveHex) {
+      const sel = $('sessionLookupSelect');
+      if (!sel) return;
+      const cur = sel.value;
+      sel.innerHTML = '<option value="">— session —</option>';
+      if (liveHex) {
+        const opt = document.createElement('option');
+        opt.value = '__live__';
+        opt.textContent = `Live · ${liveHex.slice(0, 8)}…`;
+        sel.appendChild(opt);
+      }
+      (sessions || []).forEach(s => {
+        if (!s.session_hex) return;
+        if (liveHex && s.session_hex === liveHex) return;
+        const opt = document.createElement('option');
+        opt.value = s.session_hex;
+        opt.textContent = sessionOptionLabel(s);
+        sel.appendChild(opt);
+      });
+      if (cur && [...sel.options].some(o => o.value === cur)) sel.value = cur;
+      else if (sessionViewMode === 'live' && liveHex) sel.value = '__live__';
+    }
+
+    function renderSessionLogsTable(j) {
+      const body = $('sessionLogsBody');
+      const meta = $('sessionLogsMeta');
+      const dirEl = $('sessionStoreDir');
+      if (dirEl) dirEl.textContent = j.base_dir || '—';
+      const sessions = j.sessions || [];
+      sessionLogsCache = sessions;
+      populateSessionLookupSelect(sessions, window.__liveSessionHex || null);
+      if (meta) {
+        meta.textContent = j.ok === false
+          ? (j.error || 'Failed to load sessions')
+          : `${sessions.length} saved session(s) on disk · click View or Download`;
+      }
+      if (!body) return;
+      body.innerHTML = '';
+      if (!sessions.length) {
+        body.innerHTML = '<tr><td colspan="7">No saved sessions yet — play a lobby to create one</td></tr>';
+        return;
+      }
+      sessions.forEach(s => {
+        const hex = s.session_hex || '';
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          `<td class="mono">${hex || '—'}</td>` +
+          `<td>${s.phase || '—'}</td>` +
+          `<td>${fmtTs(s.started_at)}</td>` +
+          `<td>${s.peer_count ?? '—'}</td>` +
+          `<td>${s.snapshot_count ?? 0}</td>` +
+          `<td>${s.clear_count ?? 0}</td>` +
+          `<td>` +
+            `<button type="button" class="btn-ghost session-view-btn" data-hex="${hex}" style="padding:0.35rem 0.55rem;font-size:0.75rem">View</button> ` +
+            `<button type="button" class="btn-ghost session-dl-btn" data-hex="${hex}" style="padding:0.35rem 0.55rem;font-size:0.75rem">Download</button>` +
+          `</td>`;
+        body.appendChild(tr);
+      });
+    }
+
+    async function loadSessionLogs(opts = {}) {
+      try {
+        const r = await fetch('/v1/sessions');
+        const j = await r.json();
+        renderSessionLogsTable(j);
+        sessionLogsLoaded = true;
+        if (opts.toast) toast(`Loaded ${(j.sessions || []).length} session(s)`);
+      } catch (e) {
+        const body = $('sessionLogsBody');
+        if (body) body.innerHTML = '<tr><td colspan="7">Failed to load session logs</td></tr>';
+        const meta = $('sessionLogsMeta');
+        if (meta) meta.textContent = 'Failed to load session logs';
+      }
+    }
+
+    function downloadSessionHex(hex) {
+      if (!hex || hex === '__live__') {
+        hex = window.__liveSessionHex;
+      }
+      if (!hex) {
+        toast('No session selected');
+        return;
+      }
+      window.location.href = '/v1/sessions/' + encodeURIComponent(hex) + '/download';
+    }
+
+    async function viewSessionHex(hex) {
+      if (!hex || hex === '__live__') {
+        setSessionViewLive();
+        return;
+      }
+      try {
+        const r = await fetch('/v1/sessions/' + encodeURIComponent(hex));
+        const j = await r.json();
+        if (!r.ok || j.ok === false) throw new Error(j.error || 'HTTP ' + r.status);
+        const meta = j.meta || {};
+        const peers = j.peers || [];
+        window.__peerRows = peers;
+        $('sessionHex').textContent = hex;
+        renderIdenticalPeers($('identicalPeersOverview'), peers);
+        const panel = $('identicalPeersPanel');
+        if (panel) panel.style.display = '';
+        const hint = $('identicalPeersHint');
+        if (hint) {
+          hint.innerHTML = `Archive view · phase <strong>${meta.phase || '?'}</strong> · started ${fmtTs(meta.started_at)} · ${peers.length} peer(s) · ${j.snapshot_count || 0} snapshot(s). Shield / restrict disabled for archived data.`;
+        }
+        setSessionViewMode('archive');
+        const sel = $('sessionLookupSelect');
+        if (sel) sel.value = hex;
+        toast('Loaded archived session ' + hex.slice(0, 8) + '…');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } catch (e) {
+        toast(e.message || 'Failed to load session');
+      }
+    }
+
+    function setSessionViewLive() {
+      setSessionViewMode('live');
+      const sel = $('sessionLookupSelect');
+      if (sel && window.__liveSessionHex) sel.value = '__live__';
+      else if (sel) sel.value = '';
+      refresh();
+    }
 
     function updatePeerSelectCount() {
       const el = $('peerSelectCount');
@@ -670,6 +887,7 @@
       try { localStorage.setItem(tabKey, name); } catch (_) {}
       if (name === 'traffic') loadTraffic(trafficDir);
       if (name === 'connections') loadConnectionsDb();
+      if (name === 'sessions' && !sessionLogsLoaded) loadSessionLogs();
     }
 
     const selectedConnIps = new Set();
@@ -858,21 +1076,27 @@
     }
 
     function renderIdenticalPeersPanel(peerTracker) {
+      if (sessionViewMode === 'archive') return;
       const pt = peerTracker || {};
       const phase = pt.phase || '';
       const gaming = phase === 'matchmaking' || phase === 'in-match';
       const rows = gaming ? (pt.peers || []) : [];
       window.__peerRows = rows;
+      window.__liveSessionHex = gaming ? (pt.session_hex || null) : null;
       $('sessionHex').textContent = gaming ? (pt.session_hex || '—') : '—';
+      if (sessionLogsLoaded || sessionLogsCache.length) {
+        populateSessionLookupSelect(sessionLogsCache, window.__liveSessionHex);
+      }
       renderIdenticalPeers($('identicalPeersOverview'), rows);
       const panel = $('identicalPeersPanel');
       if (panel) panel.style.display = '';
       const hint = $('identicalPeersHint');
       if (hint) {
-        hint.textContent = gaming
-          ? ''
-          : (phase ? `Xbox idle (${phase}) — peer table clears until you queue or enter a match.` : '');
+        hint.innerHTML = gaming
+          ? '<strong>Peak size</strong> = largest identical burst · <strong>Size spread</strong> = min–max bytes this session (<span class="bad">fixed</span> = probe pattern) · Shield / Restrict apply on array-firewall'
+          : (phase ? `Xbox idle (${phase}) — peer table clears until you queue or enter a match.` : '<strong>Peak size</strong> = largest identical burst · <strong>Size spread</strong> = min–max bytes this session (<span class="bad">fixed</span> = probe pattern) · Shield / Restrict apply on array-firewall');
       }
+      setSessionViewMode('live');
     }
 
     document.querySelectorAll('.tab').forEach(t => {
@@ -1466,6 +1690,10 @@
     }
 
     async function peerAction(url) {
+      if (sessionViewMode === 'archive') {
+        toast('Switch to live session to shield or restrict');
+        return;
+      }
       const ips = selectedPeerList();
       if (!ips.length) {
         toast('Select at least one IP');
@@ -1515,7 +1743,37 @@
       updatePeerSelectCount();
       if (!selectedPeerIps.size) toast('No VPS · game-peer rows in table');
     };
-    $('btnClearPeers').onclick = () => action('/v1/peers/clear');
+    $('btnClearPeers').onclick = () => {
+      if (sessionViewMode === 'archive') {
+        toast('Switch to live session to clear the peer table');
+        return;
+      }
+      action('/v1/peers/clear');
+    };
+    $('btnSessionView').onclick = () => {
+      const hex = ($('sessionLookupSelect') || {}).value;
+      if (!hex) {
+        toast('Pick a session from the dropdown');
+        return;
+      }
+      viewSessionHex(hex);
+    };
+    $('btnSessionDownload').onclick = () => {
+      const hex = ($('sessionLookupSelect') || {}).value;
+      if (!hex) {
+        toast('Pick a session from the dropdown');
+        return;
+      }
+      downloadSessionHex(hex === '__live__' ? window.__liveSessionHex : hex);
+    };
+    $('btnSessionLive').onclick = () => setSessionViewLive();
+    $('btnSessionsRefresh').onclick = () => loadSessionLogs({ toast: true });
+    $('sessionLogsBody').addEventListener('click', (ev) => {
+      const t = ev.target;
+      if (!t || !t.dataset) return;
+      if (t.classList.contains('session-view-btn')) viewSessionHex(t.dataset.hex);
+      if (t.classList.contains('session-dl-btn')) downloadSessionHex(t.dataset.hex);
+    });
     $('btnInMatch').onclick = () => action('/v1/session/match');
     $('btnBad').onclick = () => action('/v1/feedback', { bad_lobby: true, note: 'dashboard' });
     $('btnKicked').onclick = () => action('/v1/feedback/kicked');
@@ -1580,6 +1838,7 @@
     if (fw) fw.href = `http://${location.hostname}:8090/`;
 
     refresh();
+    loadSessionLogs();
     setInterval(refresh, 4000);
   </script>
 </body>

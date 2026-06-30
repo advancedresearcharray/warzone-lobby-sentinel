@@ -433,7 +433,34 @@ impl PeerTracker {
                 let meta_path = path.join("session.meta.json");
                 if meta_path.is_file() {
                     if let Ok(text) = fs::read_to_string(&meta_path) {
-                        if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                        if let Ok(mut v) = serde_json::from_str::<Value>(&text) {
+                            if let Some(obj) = v.as_object_mut() {
+                                let peers_path = path.join("peers.latest.json");
+                                if peers_path.is_file() {
+                                    if let Ok(doc) = Self::read_json_path(&peers_path) {
+                                        let n = doc
+                                            .get("peers")
+                                            .and_then(|p| p.as_array())
+                                            .map(|a| a.len())
+                                            .unwrap_or(0);
+                                        obj.insert("peer_count".into(), json!(n));
+                                    }
+                                }
+                                let snap_dir = path.join("snapshots");
+                                let snap_n = fs::read_dir(&snap_dir)
+                                    .map(|rd| {
+                                        rd.flatten()
+                                            .filter(|e| {
+                                                e.path()
+                                                    .extension()
+                                                    .and_then(|s| s.to_str())
+                                                    == Some("json")
+                                            })
+                                            .count()
+                                    })
+                                    .unwrap_or(0);
+                                obj.insert("snapshot_count".into(), json!(snap_n));
+                            }
                             sessions.push(v);
                             continue;
                         }
@@ -447,7 +474,111 @@ impl PeerTracker {
             let tb = b.get("started_at").and_then(|v| v.as_f64()).unwrap_or(0.0);
             tb.partial_cmp(&ta).unwrap_or(std::cmp::Ordering::Equal)
         });
-        json!({ "sessions": sessions, "base_dir": self.base_dir.display().to_string() })
+        json!({ "sessions": sessions, "base_dir": self.base_dir.display().to_string(), "count": sessions.len() })
+    }
+
+    pub fn read_session(&self, hex: &str) -> Result<Value, String> {
+        if !Self::valid_session_hex(hex) {
+            return Err("invalid session_hex".into());
+        }
+        let dir = self.session_dir(hex);
+        if !dir.is_dir() {
+            return Err("session not found".into());
+        }
+        let meta = Self::read_json_path(&dir.join("session.meta.json"))?;
+        let peers_doc = Self::read_json_path(&dir.join("peers.latest.json")).unwrap_or(json!({}));
+        let peers = peers_doc
+            .get("peers")
+            .cloned()
+            .unwrap_or_else(|| json!([]));
+        let mut snapshots: Vec<Value> = Vec::new();
+        let snap_dir = dir.join("snapshots");
+        if snap_dir.is_dir() {
+            for ent in fs::read_dir(&snap_dir).map_err(|e| e.to_string())?.flatten() {
+                let path = ent.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !name.ends_with(".json") {
+                    continue;
+                }
+                let mut doc = Self::read_json_path(&path)?;
+                if doc.get("filename").is_none() {
+                    doc["filename"] = json!(name);
+                }
+                snapshots.push(doc);
+            }
+        }
+        snapshots.sort_by(|a, b| {
+            let fa = a.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+            let fb = b.get("filename").and_then(|v| v.as_str()).unwrap_or("");
+            fa.cmp(fb)
+        });
+        Ok(json!({
+            "ok": true,
+            "session_hex": hex,
+            "meta": meta,
+            "peers": peers,
+            "peer_count": peers.as_array().map(|a| a.len()).unwrap_or(0),
+            "snapshots": snapshots,
+            "snapshot_count": snapshots.len(),
+            "storage_dir": dir.display().to_string(),
+        }))
+    }
+
+    pub fn export_session_bundle(&self, hex: &str) -> Result<Value, String> {
+        let detail = self.read_session(hex)?;
+        let dir = self.session_dir(hex);
+        let mut files: Vec<Value> = Vec::new();
+        for ent in fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+            let path = ent.path();
+            if path.is_file() {
+                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                if name.ends_with(".json") {
+                    files.push(json!({
+                        "path": name,
+                        "data": Self::read_json_path(&path)?,
+                    }));
+                }
+            }
+        }
+        let snap_dir = dir.join("snapshots");
+        if snap_dir.is_dir() {
+            for ent in fs::read_dir(&snap_dir).map_err(|e| e.to_string())?.flatten() {
+                let path = ent.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                if name.ends_with(".json") {
+                    files.push(json!({
+                        "path": format!("snapshots/{name}"),
+                        "data": Self::read_json_path(&path)?,
+                    }));
+                }
+            }
+        }
+        Ok(json!({
+            "exported_at": now_secs(),
+            "format": "warzone-sentinel-session-v1",
+            "session_hex": hex,
+            "detail": detail,
+            "files": files,
+        }))
+    }
+
+    fn valid_session_hex(hex: &str) -> bool {
+        hex.len() == 16 && hex.chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    fn read_json_path(path: &std::path::Path) -> Result<Value, String> {
+        let text = fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", path.display()))
     }
 }
 

@@ -1,6 +1,6 @@
 use axum::{
-    extract::{Query, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{header, StatusCode},
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
     Form, Json, Router,
@@ -124,6 +124,9 @@ async fn main() {
         .route("/v1/packets/capture", post(packets_capture))
         .route("/v1/peers/clear", post(peers_clear))
         .route("/v1/peers/sessions", get(peers_sessions))
+        .route("/v1/sessions", get(sessions_list))
+        .route("/v1/sessions/{hex}", get(session_detail))
+        .route("/v1/sessions/{hex}/download", get(session_download))
         .route("/v1/peers/shield", post(peers_shield))
         .route("/v1/peers/restrict", post(peers_restrict))
         .route("/v1/peers/unrestrict", post(peers_unrestrict))
@@ -734,6 +737,40 @@ async fn peers_sessions() -> Json<Value> {
         "tracker": peer_tracker::tracker().to_json(),
         "history": peer_tracker::tracker().list_sessions(),
     }))
+}
+
+async fn sessions_list() -> Json<Value> {
+    let mut out = peer_tracker::tracker().list_sessions();
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("ok".into(), json!(true));
+    }
+    Json(out)
+}
+
+async fn session_detail(Path(hex): Path<String>) -> Result<Json<Value>, (StatusCode, String)> {
+    peer_tracker::tracker()
+        .read_session(&hex)
+        .map(Json)
+        .map_err(|e| (StatusCode::NOT_FOUND, e))
+}
+
+async fn session_download(Path(hex): Path<String>) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let bundle = peer_tracker::tracker()
+        .export_session_bundle(&hex)
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    let body = serde_json::to_string_pretty(&bundle)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let filename = format!("warzone-session-{hex}.json");
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/json".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        body,
+    ))
 }
 
 #[derive(Deserialize, Default)]
