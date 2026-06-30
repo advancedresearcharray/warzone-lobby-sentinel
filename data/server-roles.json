@@ -12,6 +12,28 @@
       "tier": "critical"
     },
     {
+      "id": "dedicated-server",
+      "match": [
+        "gameserver",
+        "game-server",
+        "dedicated",
+        "activision",
+        "cod-server",
+        "iw.net",
+        "cloudapp.azure.com"
+      ],
+      "cidrs": [
+        "104.208.0.0/13",
+        "51.104.0.0/14",
+        "52.224.0.0/11",
+        "18.208.0.0/13",
+        "52.94.0.0/16",
+        "34.199.0.0/16",
+        "35.186.0.0/16"
+      ],
+      "tier": "critical"
+    },
+    {
       "id": "matchmaking",
       "match": ["playfabapi.com", "playfab.com"],
       "cidrs": ["52.239.0.0/16", "52.238.0.0/16", "34.0.0.0/8", "35.0.0.0/8"],
@@ -78,15 +100,16 @@
       "tier": "normal"
     },
     {
-      "id": "game-peer",
+      "id": "vps-probe-host",
       "match": [
         "vultrusercontent.com",
+        "choopa.net",
         "linodeusercontent.com",
         "your-server.de",
-        "hinet.net"
+        "hinet.net",
+        "digitalocean.com"
       ],
-      "cidrs": ["66.42.0.0/16", "155.138.0.0/16"],
-      "tier": "normal"
+      "tier": "low"
     }
   ]
 }

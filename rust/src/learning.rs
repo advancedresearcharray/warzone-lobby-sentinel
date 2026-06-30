@@ -160,6 +160,8 @@ struct History {
 struct SessionActive {
     started_at: f64,
     game: String,
+    #[serde(default)]
+    playlist: String,
     phases: Vec<Value>,
     peak_conns: i64,
     worst_verdict: String,
@@ -195,7 +197,17 @@ struct LobbyEntry {
     conns: i64,
     mm_delta: Option<f64>,
     #[serde(default)]
+    playlist: String,
+    #[serde(default)]
     fold: Option<[f32; FOLD_DIM]>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+struct FederatedFold {
+    ts: f64,
+    source: String,
+    label: String,
+    fold: [f32; FOLD_DIM],
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -231,6 +243,8 @@ struct LearningState {
     feedback: Vec<Feedback>,
     #[serde(default)]
     outcomes: Vec<SessionOutcome>,
+    #[serde(default)]
+    federated_folds: Vec<FederatedFold>,
     #[serde(default)]
     folded_blob: Option<Vec<u8>>,
     #[serde(default)]
@@ -361,11 +375,15 @@ impl LearningEngine {
     }
 
     pub fn thresholds(&self) -> AdaptiveThresholds {
-        let st = self.state.lock();
-        Self::thresholds_from_state(&st)
+        self.thresholds_for_playlist("")
     }
 
-    fn thresholds_from_state(st: &LearningState) -> AdaptiveThresholds {
+    pub fn thresholds_for_playlist(&self, playlist: &str) -> AdaptiveThresholds {
+        let st = self.state.lock();
+        Self::thresholds_from_state(&st, playlist)
+    }
+
+    fn thresholds_from_state(st: &LearningState, playlist: &str) -> AdaptiveThresholds {
         let n = st.history.conn_count.len();
         if n < MIN_SAMPLES {
             return AdaptiveThresholds {
@@ -374,6 +392,9 @@ impl LearningEngine {
             };
         }
 
+        let playlist_match = |pl: &str| -> bool {
+            playlist.is_empty() || pl.is_empty() || pl.eq_ignore_ascii_case(playlist)
+        };
         let conns: Vec<f64> = st
             .history
             .conn_count
@@ -384,13 +405,16 @@ impl LearningEngine {
         let user_bad_conns: Vec<f64> = st
             .lobbies
             .iter()
-            .filter(|lb| lb.label == "USER_BAD" || lb.label == "LIKELY")
+            .filter(|lb| {
+                playlist_match(&lb.playlist)
+                    && (lb.label == "USER_BAD" || lb.label == "LIKELY")
+            })
             .map(|lb| lb.conns as f64)
             .collect();
         let good_conns: Vec<f64> = st
             .lobbies
             .iter()
-            .filter(|lb| is_good_label(&lb.label))
+            .filter(|lb| playlist_match(&lb.playlist) && is_good_label(&lb.label))
             .map(|lb| lb.conns as f64)
             .chain(
                 st.feedback
@@ -402,7 +426,7 @@ impl LearningEngine {
         let marginal_conns: Vec<f64> = st
             .lobbies
             .iter()
-            .filter(|lb| is_marginal_label(&lb.label))
+            .filter(|lb| playlist_match(&lb.playlist) && is_marginal_label(&lb.label))
             .map(|lb| lb.conns as f64)
             .collect();
         let mm_deltas: Vec<f64> = st.history.mm_delta.iter().map(|x| x.v).collect();
@@ -522,6 +546,7 @@ impl LearningEngine {
         verdict: &CheaterVerdict,
         mm_delta: Option<f64>,
         server_jitter: Option<f64>,
+        playlist: &str,
     ) {
         let ts = now();
         let mut st = self.state.lock();
@@ -657,8 +682,8 @@ impl LearningEngine {
             MAX_SAMPLES,
         );
 
-        self.update_session_locked(&mut st, phase, verdict, conns, snapshot);
-        self.record_lobby_locked(&mut st, phase, verdict, conns, mm_delta, snapshot);
+        self.update_session_locked(&mut st, phase, verdict, conns, snapshot, playlist);
+        self.record_lobby_locked(&mut st, phase, verdict, conns, mm_delta, snapshot, playlist);
         drop(st);
         self.save();
     }
@@ -670,6 +695,7 @@ impl LearningEngine {
         verdict: &CheaterVerdict,
         conns: i64,
         snapshot: &Value,
+        playlist: &str,
     ) {
         let gaming = phase == "matchmaking" || phase == "in-match";
         let now_ts = now();
@@ -682,6 +708,7 @@ impl LearningEngine {
                     .and_then(|v| v.as_str())
                     .unwrap_or("warzone")
                     .into(),
+                playlist: playlist.into(),
                 phases: vec![],
                 peak_conns: conns,
                 worst_verdict: verdict.label.clone(),
@@ -697,6 +724,9 @@ impl LearningEngine {
         }
 
         if let Some(active) = st.sessions.active.as_mut() {
+            if !playlist.is_empty() {
+                active.playlist = playlist.into();
+            }
             active.peak_conns = active.peak_conns.max(conns);
             active.gaming_polls = active.gaming_polls.saturating_add(1);
             let last_phase = active
@@ -769,6 +799,7 @@ impl LearningEngine {
         conns: i64,
         mm_delta: Option<f64>,
         snapshot: &Value,
+        playlist: &str,
     ) {
         if phase != "matchmaking" && phase != "in-match" {
             return;
@@ -793,10 +824,15 @@ impl LearningEngine {
                 confidence: verdict.confidence,
                 conns,
                 mm_delta,
+                playlist: playlist.into(),
                 fold: Some(fold),
             },
             MAX_LOBBIES,
         );
+    }
+
+    pub fn record_kick_event(&self, note: &str) {
+        self.record_feedback(true, note, "LIKELY", 90.0);
     }
 
     pub fn record_feedback(&self, bad_lobby: bool, note: &str, verdict_label: &str, verdict_score: f64) {
@@ -894,6 +930,7 @@ impl LearningEngine {
         conns: i64,
         phase: &str,
         mm_delta: Option<f64>,
+        playlist: &str,
     ) -> (f64, Vec<String>) {
         let st = self.state.lock();
         if st
@@ -907,7 +944,7 @@ impl LearningEngine {
                 vec!["You confirmed cheaters this session — treating as LIKELY".into()],
             );
         }
-        let t = Self::thresholds_from_state(&st);
+        let t = Self::thresholds_from_state(&st, playlist);
         let mut notes = Vec::new();
         let mut score = base_score;
 
@@ -1090,6 +1127,33 @@ impl LearningEngine {
             }
         }
 
+        // Federated bad-lobby fingerprints.
+        if !st.federated_folds.is_empty() {
+            let current = fold_telemetry(
+                conns as f32,
+                None,
+                mm_delta.map(|v| v as f32),
+                None,
+                None,
+                &[],
+                phase_code(phase),
+                base_score as f32,
+            );
+            let fed_hits = st
+                .federated_folds
+                .iter()
+                .rev()
+                .take(40)
+                .filter(|ff| cosine_similarity(&current, &ff.fold) > 0.86)
+                .count();
+            if fed_hits >= 1 {
+                score += (fed_hits as f64 * 0.08).min(0.22);
+                notes.push(format!(
+                    "Federated intel matches {fed_hits} known bad-lobby fingerprint(s)"
+                ));
+            }
+        }
+
         if phase == "in-match" && conns >= 65 {
             score = score.max(0.26);
             if notes.is_empty() {
@@ -1102,9 +1166,131 @@ impl LearningEngine {
         (score.clamp(0.0, 1.0), notes)
     }
 
+    pub fn lobby_reputation(
+        &self,
+        snapshot: &Value,
+        conns: i64,
+        phase: &str,
+        mm_delta: Option<f64>,
+        playlist: &str,
+        offender_ips: &[String],
+    ) -> Value {
+        let similar = self.find_similar_lobbies(snapshot, conns, phase, mm_delta, 8);
+        let bad_hits: Vec<_> = similar
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s.get("label").and_then(|v| v.as_str()),
+                    Some("LIKELY") | Some("USER_BAD") | Some("USER_MARGINAL") | Some("POSSIBLE")
+                )
+            })
+            .collect();
+        let max_sim = similar
+            .first()
+            .and_then(|s| s.get("similarity").and_then(|v| v.as_f64()))
+            .unwrap_or(0.0);
+        let offender_overlap = offender_ips.len();
+        let gate = phase == "matchmaking"
+            && (bad_hits.len() >= 2
+                || (max_sim >= 0.88 && !bad_hits.is_empty())
+                || offender_overlap >= 3);
+        json!({
+            "score": ((bad_hits.len() as f64 * 0.2) + max_sim * 0.5 + (offender_overlap as f64 * 0.05)).min(1.0),
+            "similar_bad": bad_hits.len(),
+            "max_similarity": max_sim,
+            "offender_ips": offender_overlap,
+            "playlist": playlist,
+            "gate": gate,
+            "similar": similar,
+        })
+    }
+
+    pub fn export_intel(&self) -> Value {
+        let st = self.state.lock();
+        let bad_folds: Vec<Value> = st
+            .lobbies
+            .iter()
+            .filter(|lb| {
+                lb.label == "LIKELY"
+                    || lb.label == "USER_BAD"
+                    || lb.label == "USER_MARGINAL"
+            })
+            .filter_map(|lb| lb.fold.map(|f| (lb, f)))
+            .rev()
+            .take(48)
+            .map(|(lb, fold)| {
+                json!({
+                    "label": lb.label,
+                    "conns": lb.conns,
+                    "phase": lb.phase,
+                    "playlist": lb.playlist,
+                    "fold_b64": crate::fold::fold_to_b64(&fold),
+                })
+            })
+            .collect();
+        json!({
+            "version": 1,
+            "engine": "rust",
+            "fold_dim": FOLD_DIM,
+            "exported_at": now(),
+            "bad_folds": bad_folds,
+            "feedback_bad": st.feedback.iter().filter(|f| f.bad_lobby).count(),
+        })
+    }
+
+    pub fn import_intel(&self, payload: &Value) -> Value {
+        let source = payload
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("remote");
+        let mut imported = 0usize;
+        let mut st = self.state.lock();
+        if let Some(arr) = payload.get("bad_folds").and_then(|v| v.as_array()) {
+            for item in arr {
+                let fold_b64 = item.get("fold_b64").and_then(|v| v.as_str()).unwrap_or("");
+                if let Some(fold) = crate::fold::fold_from_b64(fold_b64) {
+                    push_sample(
+                        &mut st.federated_folds,
+                        FederatedFold {
+                            ts: now(),
+                            source: source.into(),
+                            label: item
+                                .get("label")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("USER_BAD")
+                                .into(),
+                            fold,
+                        },
+                        120,
+                    );
+                    imported += 1;
+                }
+            }
+        }
+        drop(st);
+        self.save();
+        json!({ "ok": true, "imported_folds": imported, "source": source })
+    }
+
+    pub fn should_decay_blocks(&self) -> bool {
+        let st = self.state.lock();
+        st.sessions
+            .completed
+            .iter()
+            .rev()
+            .take(3)
+            .any(|s| s.user_marked_good && !s.confirmed_bad && s.worst_verdict == "CLEAN")
+    }
+
     pub fn insights(&self) -> Value {
         let st = self.state.lock();
-        let t = Self::thresholds_from_state(&st);
+        let playlist = st
+            .sessions
+            .active
+            .as_ref()
+            .map(|a| a.playlist.as_str())
+            .unwrap_or("");
+        let t = Self::thresholds_from_state(&st, playlist);
         let bad: Vec<_> = st
             .lobbies
             .iter()
@@ -1235,6 +1421,8 @@ impl LearningEngine {
             "fold_dim": FOLD_DIM,
             "folded_lobbies": fold_count,
             "fold_blob_kb": (blob_kb * 10.0).round() / 10.0,
+            "federated_folds": st.federated_folds.len(),
+            "active_playlist": playlist,
             "thresholds": t.to_json(),
             "profiles": {
                 "good_samples": good.len(),

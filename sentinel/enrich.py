@@ -110,13 +110,73 @@ def classify_host(hostname: str) -> str:
     return "unknown"
 
 
-def _peer_fallback(ip: str, port: int | None, proto: str) -> str | None:
+def _is_vps_provider_host(ip: str, hostname_hint: str = "") -> bool:
+    if not ip:
+        return False
+    hint = (hostname_hint or "").lower()
+    if any(x in hint for x in ("vultr", "choopa", "linode", "digitalocean", "your-server")):
+        return True
+    if ip.startswith(("45.76.", "45.77.", "66.42.", "96.30.", "108.61.", "149.28.", "155.138.", "207.148.", "140.82.", "144.202.")):
+        return True
+    if hostname_hint and classify_host(hostname_hint) == "vps-probe-host":
+        return True
+    return False
+
+
+def _classify_udp_game_role(ip: str, port: int | None, proto: str) -> str | None:
     if not ip or _is_private_ip(ip):
         return None
-    if (proto or "").lower() == "udp":
-        if port in (3074, 3075, 3544) or (port is not None and port >= 1024):
-            return "game-peer"
+    if (proto or "").lower() != "udp":
+        return None
+    if port in (3074, 3075):
+        return "dedicated-server"
+    if port is not None and port >= 1024:
+        return "p2p-mesh"
     return None
+
+
+def _peer_fallback(ip: str, port: int | None, proto: str) -> str | None:
+    return _classify_udp_game_role(ip, port, proto)
+
+
+def _is_inbound_player_peer_port(port: int | None, proto: str) -> bool:
+    if (proto or "").lower() != "udp":
+        return False
+    if port in (3074, 3075):
+        return True
+    return port is not None and port >= 1024
+
+
+def classify_inbound_endpoint(
+    remote: str = "",
+    hostname_hint: str = "",
+    port: int | None = None,
+    proto: str = "",
+) -> str:
+    ip = _ip_from_remote(remote)
+    if port is None:
+        port = _port_from_remote(remote)
+
+    if ip:
+        local = _classify_local_ip(ip)
+        if local:
+            return local
+        role = _classify_cidr(ip)
+        if role:
+            return role
+
+    hint = (hostname_hint or "").strip()
+    if hint and not _ip_from_remote(hint):
+        role = classify_host(hint)
+        if role not in {"unknown", "vps-probe-host"}:
+            return role
+
+    if _is_inbound_player_peer_port(port, proto):
+        mesh = _classify_udp_game_role(ip, port, proto)
+        if mesh:
+            return mesh
+
+    return classify_endpoint(remote, hostname_hint, port, proto)
 
 
 def classify_endpoint(
@@ -225,13 +285,11 @@ def enrich_snapshot(snapshot: dict) -> dict:
     conns = int(snapshot.get("connections", {}).get("count") or 0)
 
     game = "unknown"
-    if role_counts.get("warzone-game") or role_counts.get("game-assets") or role_counts.get("telemetry"):
-        game = "warzone"
-    elif role_counts.get("xbox-live") and xbox_online:
+    if role_counts.get("warzone-game") or role_counts.get("game-assets") or role_counts.get("telemetry") or role_counts.get("matchmaking") or role_counts.get("dedicated-server"):
         game = "warzone"
 
     phase = "idle"
-    if role_counts.get("warzone-game"):
+    if role_counts.get("warzone-game") or role_counts.get("dedicated-server"):
         phase = "in-match"
     elif role_counts.get("matchmaking") or (role_counts.get("azure-qos", 0) >= 2 and conns >= 80):
         phase = "matchmaking"
@@ -239,7 +297,9 @@ def enrich_snapshot(snapshot: dict) -> dict:
         role_counts.get("game-assets") or role_counts.get("telemetry")
     ):
         phase = "in-match"
-    elif xbox_online and conns >= 40 and (role_counts.get("xbox-live") or role_counts.get("game-assets")):
+    elif game == "warzone" and xbox_online and conns >= 22 and (
+        role_counts.get("game-assets") or role_counts.get("matchmaking") or role_counts.get("telemetry", 0) >= 2
+    ):
         phase = "matchmaking"
     elif xbox_online and conns >= 15:
         phase = "background"

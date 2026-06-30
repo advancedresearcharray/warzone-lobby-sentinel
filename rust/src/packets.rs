@@ -1,8 +1,10 @@
-//! Direct packet capture inspection for cheat behavior (tcpdump records from Firewalla).
+//! Direct packet capture inspection for cheat behavior (tcpdump records from array-firewall).
 
 use crate::enrich::{
-    classify_endpoint_with_port, extract_ip, is_game_peer, is_known_traffic, is_unknown_inbound,
-    peer_display_label,
+    classify_endpoint_with_port, classify_inbound_endpoint, extract_ip, inbound_display_label,
+    is_game_peer, is_infrastructure, is_known_traffic, is_unknown_inbound, is_vps_game_peer,
+    is_vps_probe_role,
+    resolve_inbound_peer_role, should_drop_inbound, should_show_in_peer_table,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -60,15 +62,7 @@ pub fn analyze_packets(snapshot: &Value, phase: &str, conns: i64) -> PacketAnaly
 
     let st = match stats(snapshot) {
         Some(s) if s.get("total").and_then(|v| v.as_u64()).unwrap_or(0) > 0 => s,
-        _ => {
-            return PacketAnalysis {
-                score: 0.0,
-                signals: vec![],
-                alerts: vec!["Packet capture unavailable (Firewalla tcpdump skipped or idle)".into()],
-                verdict: "no_capture".into(),
-                metrics: json!({"enabled": false}),
-            };
-        }
+        _ => return no_capture_analysis(snapshot),
     };
 
     let total = st.get("total").and_then(|v| v.as_u64()).unwrap_or(0) as f64;
@@ -162,7 +156,10 @@ pub fn analyze_packets(snapshot: &Value, phase: &str, conns: i64) -> PacketAnaly
         let host = r.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
         let port = r.get("remotePort").and_then(|v| v.as_u64()).map(|p| p as u16);
         let proto = r.get("proto").and_then(|v| v.as_str()).unwrap_or("");
-        let role = classify_endpoint_with_port(remote, host, port, proto);
+        let role = classify_inbound_endpoint(remote, host, port, proto);
+        if should_drop_inbound(&role, port, proto, phase) {
+            continue;
+        }
         if is_unknown_inbound(&role) {
             unknown_in += 1;
         } else if is_known_traffic(&role) {
@@ -184,6 +181,9 @@ pub fn analyze_packets(snapshot: &Value, phase: &str, conns: i64) -> PacketAnaly
             continue;
         }
         let remote = r.get("remote").and_then(|v| v.as_str()).unwrap_or("?");
+        if should_drop_inbound(&classify_record_role(&recs, remote), None, "udp", phase) {
+            continue;
+        }
         let len = r.get("len").and_then(|v| v.as_u64()).unwrap_or(0);
         *size_runs.entry(format!("{remote}:{len}")).or_default() += 1;
     }
@@ -198,14 +198,31 @@ pub fn analyze_packets(snapshot: &Value, phase: &str, conns: i64) -> PacketAnaly
         }
         if *count >= PEER_BURST_SIGNAL {
             let remote = key.rsplit_once(':').map(|(r, _)| r).unwrap_or(key.as_str());
-            micro_burst_peer = is_game_peer(&classify_record_role(&recs, remote));
+            micro_burst_peer = is_vps_probe_role(&classify_record_role(&recs, remote));
         }
     }
 
     // Game-peer probe traffic (P2P / VPS peers — likely kick probe source)
     let peer_report = analyze_game_peers(&recs);
+    let identical_peers = analyze_inbound_identical(&recs, phase);
     let mut peer_tiny_in = 0u32;
     let mut peer_in = 0u32;
+    let mut suspicious: Vec<Value> = Vec::new();
+    for row in &identical_peers {
+        let label = row.get("label").and_then(|v| v.as_str()).unwrap_or("");
+        let role = row.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if row.get("vps_probe").and_then(|v| v.as_bool()) == Some(true) {
+            if let Some(ip) = row.get("ip").and_then(|v| v.as_str()) {
+                suspicious.push(json!({
+                    "ip": ip,
+                    "label": label,
+                    "role": role,
+                    "vps_probe": true,
+                    "reason": "vultr_vps_probe",
+                }));
+            }
+        }
+    }
     for alert in &peer_report.alerts {
         alerts.push(alert.clone());
     }
@@ -224,7 +241,17 @@ pub fn analyze_packets(snapshot: &Value, phase: &str, conns: i64) -> PacketAnaly
             .max(if micro_burst_peer { PEER_BURST_SIGNAL } else { 0 });
         signals.push(("peer_micro_burst".into(), (burst as f64 / 15.0).min(1.0)));
     }
-    if !peer_report.suspicious.is_empty() {
+    if !suspicious.is_empty() {
+        score += 0.18;
+        signals.push((
+            "suspicious_peer".into(),
+            (suspicious.len() as f64 / 3.0).min(1.0),
+        ));
+        alerts.push(format!(
+            "{} VPS probe host(s) detected — auto-block active",
+            suspicious.len()
+        ));
+    } else if !peer_report.suspicious.is_empty() {
         score += 0.15;
         signals.push((
             "suspicious_peer".into(),
@@ -268,7 +295,12 @@ pub fn analyze_packets(snapshot: &Value, phase: &str, conns: i64) -> PacketAnaly
             "game_inbound_packets": game_in,
             "peer_inbound_packets": peer_in,
             "peer_tiny_inbound": peer_tiny_in,
-            "suspicious_peers": peer_report.suspicious,
+            "suspicious_peers": suspicious,
+            "vps_game_peers": identical_peers
+                .iter()
+                .filter(|row| row.get("vps_probe").and_then(|v| v.as_bool()) == Some(true))
+                .collect::<Vec<_>>(),
+            "inbound_identical_peers": identical_peers,
             "records_in_snapshot": recs.len(),
         }),
     }
@@ -282,13 +314,133 @@ struct PeerReport {
 }
 
 #[derive(Default)]
-struct PeerAgg {
+struct IdenticalPeerAgg {
     ip: String,
     remote: String,
+    hostname: String,
     label: String,
-    tiny: u32,
+    role: String,
     total: u32,
-    max_same_size: u32,
+    tiny: u32,
+    max_identical: u32,
+    identical_size: u64,
+    packet_size_min: u64,
+    packet_size_max: u64,
+}
+
+/// Per inbound IP: max run of same-size packets in the capture window.
+fn analyze_inbound_identical(recs: &[Value], phase: &str) -> Vec<Value> {
+    let mut by_ip: HashMap<String, IdenticalPeerAgg> = HashMap::new();
+    let mut size_runs: HashMap<String, u32> = HashMap::new();
+
+    for r in recs {
+        if r.get("dir").and_then(|v| v.as_str()) != Some("in") {
+            continue;
+        }
+        let remote = r.get("remote").and_then(|v| v.as_str()).unwrap_or("?");
+        let ip = extract_ip(remote);
+        if ip.is_empty() {
+            continue;
+        }
+        let len = r.get("len").and_then(|v| v.as_u64()).unwrap_or(0);
+        let host = r.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
+        let role = record_role(r);
+        if !should_show_in_peer_table(&role, phase) {
+            continue;
+        }
+        let entry = by_ip.entry(ip.clone()).or_insert_with(|| IdenticalPeerAgg {
+            ip: ip.clone(),
+            remote: remote.to_string(),
+            hostname: host.to_string(),
+            label: inbound_display_label(&ip, host, &role),
+            role: role.clone(),
+            ..Default::default()
+        });
+        if entry.role.is_empty() || entry.role == "unknown" {
+            entry.role = role;
+        }
+        entry.total += 1;
+        if len > 0 {
+            if entry.packet_size_min == 0 || len < entry.packet_size_min {
+                entry.packet_size_min = len;
+            }
+            if len > entry.packet_size_max {
+                entry.packet_size_max = len;
+            }
+        }
+        if len <= TINY_PKT_MAX {
+            entry.tiny += 1;
+        }
+        let burst_key = format!("{ip}:{len}");
+        let burst = size_runs.entry(burst_key).or_insert(0);
+        *burst += 1;
+        if *burst > entry.max_identical {
+            entry.max_identical = *burst;
+            entry.identical_size = len;
+        }
+    }
+
+    let mut rows: Vec<Value> = by_ip
+        .values()
+        .map(|p| {
+            let role = resolve_inbound_peer_role(
+                &p.ip,
+                &p.hostname,
+                &p.role,
+                p.max_identical,
+                u64::from(p.tiny),
+                u64::from(p.total),
+                p.packet_size_min,
+                p.packet_size_max,
+            );
+            let label = inbound_display_label(&p.ip, &p.hostname, &role);
+            let confirmed = is_vps_probe_role(&role);
+            let vps_probe = is_vps_probe_role(&role) && is_vps_game_peer(&label, &role);
+            let fixed_size = p.packet_size_min > 0
+                && p.packet_size_min == p.packet_size_max
+                && p.max_identical >= PEER_BURST_SIGNAL;
+            json!({
+                "ip": p.ip,
+                "remote": p.remote,
+                "label": label,
+                "role": role,
+                "confirmed": confirmed,
+                "total_packets": p.total,
+                "tiny_packets": p.tiny,
+                "identical_count": p.max_identical,
+                "identical_size": p.identical_size,
+                "packet_size_min": p.packet_size_min,
+                "packet_size_max": p.packet_size_max,
+                "fixed_size": fixed_size,
+                "vps_probe": vps_probe,
+                "suspicious": confirmed
+                    && (vps_probe
+                        || fixed_size
+                        || p.max_identical >= PEER_BURST_SIGNAL
+                        || p.tiny >= PEER_TINY_SIGNAL
+                        || (p.tiny >= 3 && p.total >= 6)),
+            })
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        let ac = a.get("identical_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let bc = b.get("identical_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        bc.cmp(&ac).then_with(|| {
+            a.get("ip")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .cmp(b.get("ip").and_then(|v| v.as_str()).unwrap_or(""))
+        })
+    });
+    rows
+}
+
+fn parse_port(r: &Value) -> Option<u16> {
+    r.get("remotePort").and_then(|v| v.as_u64()).map(|p| p as u16)
+}
+
+fn proto_from(r: &Value) -> &str {
+    r.get("proto").and_then(|v| v.as_str()).unwrap_or("")
 }
 
 fn record_role(r: &Value) -> String {
@@ -299,8 +451,11 @@ fn record_role(r: &Value) -> String {
     }
     let remote = r.get("remote").and_then(|v| v.as_str()).unwrap_or("");
     let host = r.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
-    let port = r.get("remotePort").and_then(|v| v.as_u64()).map(|p| p as u16);
-    let proto = r.get("proto").and_then(|v| v.as_str()).unwrap_or("");
+    let port = parse_port(r);
+    let proto = proto_from(r);
+    if r.get("dir").and_then(|v| v.as_str()) == Some("in") {
+        return classify_inbound_endpoint(remote, host, port, proto);
+    }
     classify_endpoint_with_port(remote, host, port, proto)
 }
 
@@ -310,86 +465,17 @@ fn classify_record_role(recs: &[Value], remote: &str) -> String {
             return record_role(r);
         }
     }
-    classify_endpoint_with_port(remote, "", None, "udp")
+    classify_inbound_endpoint(remote, "", None, "udp")
 }
 
-fn analyze_game_peers(recs: &[Value]) -> PeerReport {
-    let mut by_ip: HashMap<String, PeerAgg> = HashMap::new();
-    let mut size_runs: HashMap<String, u32> = HashMap::new();
-
-    for r in recs {
-        if r.get("dir").and_then(|v| v.as_str()) != Some("in") {
-            continue;
-        }
-        let role = record_role(r);
-        if !is_game_peer(&role) {
-            continue;
-        }
-        let remote = r.get("remote").and_then(|v| v.as_str()).unwrap_or("?");
-        let ip = extract_ip(remote);
-        if ip.is_empty() {
-            continue;
-        }
-        let len = r.get("len").and_then(|v| v.as_u64()).unwrap_or(0);
-        let host = r.get("hostname").and_then(|v| v.as_str()).unwrap_or("");
-        let entry = by_ip.entry(ip.clone()).or_insert_with(|| PeerAgg {
-            ip: ip.clone(),
-            remote: remote.to_string(),
-            label: peer_display_label(&ip, host),
-            ..Default::default()
-        });
-        entry.total += 1;
-        if len <= TINY_PKT_MAX {
-            entry.tiny += 1;
-        }
-        let burst_key = format!("{remote}:{len}");
-        let burst = size_runs.entry(burst_key).or_insert(0);
-        *burst += 1;
-        entry.max_same_size = entry.max_same_size.max(*burst);
-    }
-
-    let mut report = PeerReport {
+fn analyze_game_peers(_recs: &[Value]) -> PeerReport {
+    // Unverified P2P-shaped traffic is dropped at console shield — not scored or alerted.
+    PeerReport {
         alerts: vec![],
         suspicious: vec![],
         max_tiny: 0,
         max_burst: 0,
-    };
-
-    for peer in by_ip.values() {
-        report.max_tiny = report.max_tiny.max(peer.tiny);
-        report.max_burst = report.max_burst.max(peer.max_same_size);
-        let suspicious = peer.tiny >= PEER_TINY_SIGNAL
-            || peer.max_same_size >= PEER_BURST_SIGNAL
-            || (peer.tiny >= 3 && peer.total >= 6);
-        if !suspicious {
-            continue;
-        }
-        let mut reasons = Vec::new();
-        if peer.tiny >= PEER_TINY_SIGNAL {
-            reasons.push(format!("{} tiny packets", peer.tiny));
-        }
-        if peer.max_same_size >= PEER_BURST_SIGNAL {
-            reasons.push(format!("burst×{}", peer.max_same_size));
-        }
-        report.alerts.push(format!(
-            "Suspicious peer: {} @ {} — {}",
-            peer.label,
-            peer.ip,
-            reasons.join(", ")
-        ));
-        report.suspicious.push(json!({
-            "ip": peer.ip,
-            "remote": peer.remote,
-            "label": peer.label,
-            "vendor": peer.label,
-            "packets": peer.total,
-            "tiny_packets": peer.tiny,
-            "max_burst": peer.max_same_size,
-            "reasons": reasons,
-        }));
     }
-
-    report
 }
 
 pub fn inspect_capture(capture: &Value, phase: &str, conns: i64) -> Value {
@@ -412,6 +498,61 @@ pub fn inspect_capture(capture: &Value, phase: &str, conns: i64) -> Value {
         "flows": flows.iter().take(24).collect::<Vec<_>>(),
         "stats": capture.get("stats"),
     })
+}
+
+fn no_capture_analysis(snapshot: &Value) -> PacketAnalysis {
+    let online = snapshot
+        .pointer("/xbox/online")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let capture_enabled = snapshot
+        .pointer("/packetCapture/enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let stats_disabled = stats(snapshot)
+        .and_then(|s| s.get("enabled"))
+        .and_then(|v| v.as_bool())
+        == Some(false);
+    let pressure = snapshot
+        .pointer("/preabstract/mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("normal");
+    let window_sec = snapshot
+        .pointer("/sample/windowSec")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3);
+
+    let (alert, reason) = if !online {
+        (
+            "Xbox offline — packet capture runs when the console is on the network.",
+            "xbox_offline",
+        )
+    } else if !capture_enabled || stats_disabled || pressure != "normal" {
+        (
+            "Packet capture paused on array-firewall (memory pressure mode).",
+            "memory_pressure",
+        )
+    } else {
+        (
+            "No Xbox traffic in the capture window — idle or between Warzone sessions.",
+            "idle_window",
+        )
+    };
+
+    PacketAnalysis {
+        score: 0.0,
+        signals: vec![],
+        alerts: vec![alert.into()],
+        verdict: "no_capture".into(),
+        metrics: json!({
+            "enabled": false,
+            "reason": reason,
+            "xbox_online": online,
+            "capture_enabled": capture_enabled,
+            "pressure_mode": pressure,
+            "window_sec": window_sec,
+        }),
+    }
 }
 
 fn idle_analysis(msg: &str) -> PacketAnalysis {

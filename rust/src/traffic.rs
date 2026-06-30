@@ -320,15 +320,36 @@ fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
+fn connection_items(snapshot: &Value) -> Vec<Value> {
+    if let Some(items) = snapshot
+        .pointer("/connections/items")
+        .and_then(|v| v.as_array())
+    {
+        if !items.is_empty() {
+            return items.clone();
+        }
+    }
+    snapshot
+        .pointer("/connections/folded")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
 pub fn inspect(snapshot: &Value, direction: &str) -> Value {
     let want = direction.to_lowercase();
     let all_dirs = want == "all";
 
-    let connections = snapshot
-        .pointer("/connections/items")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let connections = connection_items(snapshot);
+    let total_count = snapshot
+        .pointer("/connections/count")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(connections.len() as u64);
+    let items_shown = connections.len() as u64;
+    let truncated = snapshot
+        .pointer("/connections/truncated")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(total_count > items_shown);
 
     let flows = snapshot
         .get("recentFlows")
@@ -414,9 +435,12 @@ pub fn inspect(snapshot: &Value, direction: &str) -> Value {
     json!({
         "direction": if all_dirs { "all" } else { want.as_str() },
         "summary": {
-            "connections_total": snapshot.pointer("/connections/count"),
+            "connections_total": total_count,
+            "connections_shown": items_shown,
+            "connections_truncated": truncated,
             "connections_out": out_conns.len(),
             "connections_in": in_conns.len(),
+            "connections_list": selected_conns.len(),
             "flows_with_upload": out_flows.len(),
             "flows_with_download": in_flows.len(),
             "xbox_upload_bytes": xbox_upload,
@@ -428,8 +452,8 @@ pub fn inspect(snapshot: &Value, direction: &str) -> Value {
             "note": "Connections use socket direction; flow upload/download are Xbox-relative (Firewalla flow.direction is WAN-relative).",
         },
         "by_role": role_summary,
-        "connections": selected_conns.iter().take(48).collect::<Vec<_>>(),
-        "flows": selected_flows.iter().take(32).collect::<Vec<_>>(),
+        "connections": selected_conns.iter().take(96).collect::<Vec<_>>(),
+        "flows": selected_flows.iter().take(48).collect::<Vec<_>>(),
         "dns_destinations": snapshot
             .get("dnsDestinations")
             .or(snapshot.get("dns_destinations")),

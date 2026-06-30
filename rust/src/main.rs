@@ -10,11 +10,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tracing_subscriber::EnvFilter;
 use warzone_sentinel::{
-    dashboard, enrich::enrich_snapshot, firewalla::FirewallaClient, learning, learning::engine,
-    network_guard::guard, network_session::NetworkSessionScorer, notify, packets, traffic,
+    dashboard, enrich::enrich_snapshot, firewalla::FirewallaClient, game_state,
+    learning, learning::engine,
+    network_guard::guard, network_session::NetworkSessionScorer, notify, packets, peer_tracker,
+    traffic,
 };
 
 struct AppState {
@@ -28,6 +30,9 @@ struct AppState {
     last_auto_alert: Mutex<Option<Value>>,
     last_packet_capture: Mutex<Option<Value>>,
     scorer: Mutex<NetworkSessionScorer>,
+    peer_restrictions_cache: Mutex<Option<(f64, Value)>>,
+    offender_ips_cache: Mutex<(f64, Vec<String>)>,
+    vps_blocked_ips: Mutex<std::collections::HashSet<String>>,
     fw: FirewallaClient,
 }
 
@@ -63,13 +68,23 @@ async fn main() {
         last_auto_alert: Mutex::new(None),
         last_packet_capture: Mutex::new(None),
         scorer: Mutex::new(NetworkSessionScorer::default()),
+        peer_restrictions_cache: Mutex::new(None),
+        offender_ips_cache: Mutex::new((0.0, Vec::new())),
+        vps_blocked_ips: Mutex::new(std::collections::HashSet::new()),
         fw,
     });
 
     let poll_state = state.clone();
-    tokio::spawn(async move {
-        run_poll_loop(poll_state, interval, idle_interval).await;
-    });
+    std::thread::Builder::new()
+        .name("wz-poll".into())
+        .spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("poll runtime");
+            rt.block_on(run_poll_loop(poll_state, interval, idle_interval));
+        })
+        .expect("poll thread spawn");
 
     let app = Router::new()
         .route("/", get(dashboard_page))
@@ -89,6 +104,13 @@ async fn main() {
         .route("/session/end", post(session_end))
         .route("/v1/session/match", post(session_match))
         .route("/session/match", post(session_match))
+        .route("/v1/events", post(events_post))
+        .route("/events", post(events_post))
+        .route("/v1/game-state", get(game_state_get).post(game_state_post))
+        .route("/v1/intel/export", get(intel_export))
+        .route("/v1/intel/import", post(intel_import))
+        .route("/intel/export", get(intel_export))
+        .route("/intel/import", post(intel_import))
         .route("/v1/network-guard/release", post(network_guard_release))
         .route("/network-guard/release", post(network_guard_release))
         .route("/v1/ai/calibration", get(ai_calibration))
@@ -100,6 +122,16 @@ async fn main() {
         .route("/v1/packets", get(packets_view))
         .route("/v1/packets/analyze", get(packets_analyze))
         .route("/v1/packets/capture", post(packets_capture))
+        .route("/v1/peers/clear", post(peers_clear))
+        .route("/v1/peers/sessions", get(peers_sessions))
+        .route("/v1/peers/shield", post(peers_shield))
+        .route("/v1/peers/restrict", post(peers_restrict))
+        .route("/v1/peers/unrestrict", post(peers_unrestrict))
+        .route("/v1/connections", get(connections_query))
+        .route("/v1/connections/sessions", get(connections_sessions))
+        .route("/v1/connections/offenders", get(connections_offenders))
+        .route("/v1/connections/action", post(connections_action))
+        .route("/v1/investigate/run", post(investigate_run))
         .route("/traffic", get(traffic_inspect))
         .route("/ai/calibration", get(ai_calibration))
         .route("/ai/analyze", get(ai_analyze))
@@ -168,17 +200,49 @@ async fn run_poll_loop(state: Arc<AppState>, interval: f64, idle_interval: f64) 
                             Some(deep_pc.cloned().unwrap_or(deep));
                     }
                 }
-                let snapshot = enrich_snapshot(raw);
+                let raw_for_enrich = raw.clone();
+                let snapshot = tokio::task::spawn_blocking(move || enrich_snapshot(raw_for_enrich))
+                    .await
+                    .unwrap_or(raw);
                 *state.last_snapshot.lock() = Some(dashboard::trim_snapshot(&snapshot));
                 let insights = json!({});
-                let (risk, alert_decision) = {
+                let (mut risk, alert_decision) = {
                     let mut scorer = state.scorer.lock();
-                    let risk = scorer.score(&snapshot, &insights);
+                    let mut risk = scorer.score(&snapshot, &insights);
+                    let conns = snapshot
+                        .pointer("/connections/count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as i64;
+                    let playlist = game_state::store().playlist();
+                    let offender_ips = cached_offender_ips(&state, poll_n).await;
+                    let reputation = engine().lobby_reputation(
+                        &snapshot,
+                        conns,
+                        &risk.phase,
+                        risk.cheater_lobby
+                            .get("mm_delta")
+                            .and_then(|v| v.as_f64()),
+                        &playlist,
+                        &offender_ips,
+                    );
+                    risk = risk.with_reputation(reputation, &offender_ips);
                     let decision = scorer.should_alert(&risk);
                     (risk, decision)
                 };
                 if risk.phase == "matchmaking" || risk.phase == "in-match" {
                     sleep_sec = interval;
+                } else if xbox_online {
+                    let conns = snapshot
+                        .pointer("/connections/count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let game = snapshot
+                        .pointer("/_enriched/game")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    if game == "warzone" && conns >= 20 {
+                        sleep_sec = interval;
+                    }
                 }
                 let ng = guard()
                     .evaluate(&state.fw, &risk, &snapshot)
@@ -195,6 +259,108 @@ async fn run_poll_loop(state: Arc<AppState>, interval: f64, idle_interval: f64) 
                     obj.insert("network_guard".into(), ng.clone());
                     if let Some(m) = ng.get("mitigation") {
                         obj.insert("defense_status".into(), m.clone());
+                    }
+                }
+                let pt = peer_tracker::tracker();
+                pt.set_phase(&risk.phase);
+                if let Some(peers) = risk
+                    .packets
+                    .get("metrics")
+                    .and_then(|m| m.get("inbound_identical_peers"))
+                    .and_then(|v| v.as_array())
+                {
+                    pt.ingest_identical_peers(&risk.phase, peers);
+                }
+                if risk.phase == "matchmaking" || risk.phase == "in-match" {
+                    if let Some(vps_ips) = extract_vps_game_peer_ips(&risk.packets) {
+                        let mut blocked = state.vps_blocked_ips.lock();
+                        let new_ips: Vec<String> = vps_ips
+                            .into_iter()
+                            .filter(|ip| !blocked.contains(ip))
+                            .collect();
+                        if !new_ips.is_empty() {
+                            let fw = state.fw.clone();
+                            let phase = risk.phase.clone();
+                            for ip in &new_ips {
+                                blocked.insert(ip.clone());
+                            }
+                            drop(blocked);
+                            let ips = new_ips.clone();
+                            tokio::spawn(async move {
+                                if let Ok(r) = fw
+                                    .block_peers(&ips, "vultr_vps_game_peer", Some(604_800))
+                                    .await
+                                {
+                                    tracing::info!(
+                                        "[vps-block] auto-blocked {} Vultr/VPS game-peer(s) in {phase}: {:?}",
+                                        ips.len(),
+                                        r.get("added").or(r.get("total"))
+                                    );
+                                }
+                                let _ = fw.sync_shield_peers("peer-strict", &ips).await;
+                            });
+                        }
+                    }
+                }
+                if risk.phase == "matchmaking" || risk.phase == "in-match" {
+                    let session_hex = pt.to_json().get("session_hex").and_then(|v| v.as_str()).map(str::to_string);
+                    if let Some(hex) = session_hex {
+                        let fw = state.fw.clone();
+                        let phase = risk.phase.clone();
+                        let xbox = fw.xbox_ip();
+                        let peers_for_db = risk
+                            .packets
+                            .pointer("/metrics/inbound_identical_peers")
+                            .cloned()
+                            .unwrap_or(json!([]));
+                        let slim_snap = json!({
+                            "connections": snapshot.get("connections"),
+                            "recentFlows": snapshot.get("recentFlows"),
+                        });
+                        tokio::spawn(async move {
+                            let body = json!({
+                                "session_hex": hex,
+                                "phase": phase,
+                                "xbox_ip": xbox,
+                                "snapshot": slim_snap,
+                                "peers": peers_for_db,
+                            });
+                            if let Err(e) = fw.ingest_connections(body).await {
+                                tracing::debug!("[conn-lite] ingest: {e}");
+                            }
+                        });
+                    }
+                }
+                if risk.phase == "matchmaking" || risk.phase == "in-match" {
+                    let kick_spike = ng
+                        .get("kick_spike")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let session_hex = pt
+                        .to_json()
+                        .get("session_hex")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    if let Some(obj) = risk_json.as_object_mut() {
+                        if let Some(hex) = session_hex.clone() {
+                            obj.insert("session_hex".into(), json!(hex));
+                        }
+                        obj.insert(
+                            "offender_ips".into(),
+                            json!(cached_offender_ips(&state, poll_n).await),
+                        );
+                    }
+                    match state.fw.mitigate_session(&risk_json, kick_spike).await {
+                        Ok(m) => {
+                            if m.get("skipped").and_then(|v| v.as_bool()) != Some(true) {
+                                if let Some(actions) = m.get("actions").and_then(|v| v.as_array()) {
+                                    if !actions.is_empty() {
+                                        tracing::info!("[mitigate] {:?}", actions);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => tracing::debug!("[mitigate] {e}"),
                     }
                 }
                 *state.risk.lock() = Some(risk_json);
@@ -299,27 +465,91 @@ async fn dashboard_page() -> Html<&'static str> {
     Html(dashboard::dashboard_page())
 }
 
+async fn cached_peer_restrictions(state: &AppState) -> Option<Value> {
+    let now = now_secs();
+    if let Some((at, cached)) = state.peer_restrictions_cache.lock().clone() {
+        if now - at < 15.0 {
+            return Some(cached);
+        }
+    }
+    let fetched = timeout(Duration::from_secs(2), state.fw.peer_blocklist_status())
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+    if let Some(v) = fetched.clone() {
+        *state.peer_restrictions_cache.lock() = Some((now, v.clone()));
+    }
+    fetched
+}
+
 async fn dashboard_data(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let scorer = state.scorer.lock();
     let snap = state.last_snapshot.lock().clone().unwrap_or(json!({}));
+    let session = state.risk.lock().clone();
+    let scorer_meta = state.scorer.lock().dashboard_meta();
+    let updated_at = *state.updated_at.lock();
+    let polls = *state.polls.lock();
+    let source = state.source.lock().clone();
+    let error = state.last_error.lock().clone();
+    let last_auto_alert = state.last_auto_alert.lock().clone();
+    let network_guard = state.network_guard.lock().clone();
+    let restrictions = cached_peer_restrictions(&state).await;
+    let learning = tokio::task::spawn_blocking(|| engine().insights())
+        .await
+        .unwrap_or(json!({}));
+    let mut peer_tracker = peer_tracker::tracker().to_json();
+    merge_peer_restrictions(&mut peer_tracker, restrictions.as_ref());
     Json(json!({
-        "updated_at": *state.updated_at.lock(),
-        "polls": *state.polls.lock(),
-        "source": *state.source.lock(),
-        "error": *state.last_error.lock(),
-        "session": *state.risk.lock(),
+        "updated_at": updated_at,
+        "polls": polls,
+        "source": source,
+        "error": error,
+        "session": session,
         "telemetry": snap.clone(),
-        "traffic": traffic::inspect(&snap, "out"),
-        "scorer": scorer.dashboard_meta(),
+        "traffic": traffic::inspect(&snap, "all"),
+        "scorer": scorer_meta,
         "alerts": {
             "mode": "automatic",
             "phone": notify::alert_status(),
-            "last_auto_alert": *state.last_auto_alert.lock(),
+            "last_auto_alert": last_auto_alert.clone(),
         },
-        "learning": engine().insights(),
-        "network_guard": *state.network_guard.lock(),
-        "last_auto_alert": *state.last_auto_alert.lock(),
+        "learning": learning,
+        "network_guard": network_guard,
+        "last_auto_alert": last_auto_alert,
+        "peer_tracker": peer_tracker,
+        "peer_restrictions": restrictions,
     }))
+}
+
+fn merge_peer_restrictions(peer_tracker: &mut Value, restrictions: Option<&Value>) {
+    let Some(bl) = restrictions else {
+        return;
+    };
+    let mut by_ip: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    if let Some(arr) = bl.get("peers").and_then(|v| v.as_array()) {
+        for p in arr {
+            if let Some(ip) = p.get("ip").and_then(|v| v.as_str()) {
+                by_ip.insert(ip.into(), p.clone());
+            }
+        }
+    }
+    let Some(peers) = peer_tracker.get_mut("peers").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for row in peers.iter_mut() {
+        let Some(ip) = row.get("ip").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if let Some(meta) = by_ip.get(ip) {
+            let reason = meta.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            row["restricted"] = json!(true);
+            row["restriction_reason"] = json!(reason);
+            row["repeat_offender"] = meta.get("repeat_offender").cloned().unwrap_or(json!(false));
+            row["shielded"] = json!(reason.contains("shield") || reason.contains("restrict"));
+        } else {
+            row["restricted"] = json!(false);
+            row["shielded"] = json!(false);
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -466,21 +696,267 @@ async fn network_guard_release(State(state): State<Arc<AppState>>) -> Json<Value
 }
 
 async fn session_match(State(state): State<Arc<AppState>>) -> Json<Value> {
-    state.scorer.lock().mark_in_match();
+    let scorer_meta = {
+        let mut scorer = state.scorer.lock();
+        scorer.mark_in_match();
+        scorer.dashboard_meta()
+    };
+    let tracker = peer_tracker::tracker();
+    tracker.set_phase("in-match");
+    let hex = tracker.ensure_session("in-match");
     Json(json!({
         "ok": true,
         "message": "In-match mode — scoring and alerts active.",
-        "scorer": state.scorer.lock().dashboard_meta(),
+        "session_hex": hex,
+        "scorer": scorer_meta,
     }))
 }
 
+async fn peers_clear() -> Json<Value> {
+    match peer_tracker::tracker().clear_table() {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn peers_sessions() -> Json<Value> {
+    Json(json!({
+        "ok": true,
+        "tracker": peer_tracker::tracker().to_json(),
+        "history": peer_tracker::tracker().list_sessions(),
+    }))
+}
+
+#[derive(Deserialize, Default)]
+struct PeerIpsBody {
+    #[serde(default)]
+    ips: Vec<String>,
+}
+
+fn normalize_ips(ips: &[String]) -> Vec<String> {
+    ips.iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+async fn peers_shield(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PeerIpsBody>,
+) -> Json<Value> {
+    let ips = normalize_ips(&body.ips);
+    if ips.is_empty() {
+        return Json(json!({ "ok": false, "error": "no IPs selected" }));
+    }
+    let session_hex = peer_tracker::tracker()
+        .to_json()
+        .get("session_hex")
+        .and_then(|v| v.as_str())
+        .unwrap_or("manual")
+        .to_string();
+    let reason = format!("sentinel-shield:{session_hex}");
+    match state
+        .fw
+        .block_peers(&ips, &reason, Some(86_400))
+        .await
+    {
+        Ok(block) => match state.fw.sync_shield_peers("peer-strict", &ips).await {
+            Ok(shield) => Json(json!({
+                "ok": block.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
+                    && shield.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                "action": "shield",
+                "ips": ips,
+                "blocklist": block,
+                "shield": shield,
+                "message": format!("Shield active for {} peer(s) — tiny probes dropped", ips.len()),
+            })),
+            Err(e) => Json(json!({ "ok": false, "error": e, "blocklist": block })),
+        },
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn peers_restrict(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PeerIpsBody>,
+) -> Json<Value> {
+    let ips = normalize_ips(&body.ips);
+    if ips.is_empty() {
+        return Json(json!({ "ok": false, "error": "no IPs selected" }));
+    }
+    let session_hex = peer_tracker::tracker()
+        .to_json()
+        .get("session_hex")
+        .and_then(|v| v.as_str())
+        .unwrap_or("manual")
+        .to_string();
+    let reason = format!("sentinel-restrict:{session_hex}");
+    match state
+        .fw
+        .block_peers(&ips, &reason, Some(604_800))
+        .await
+    {
+        Ok(block) => match state.fw.sync_shield_peers("peer-strict", &ips).await {
+            Ok(shield) => Json(json!({
+                "ok": block.get("ok").and_then(|v| v.as_bool()).unwrap_or(false)
+                    && shield.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                "action": "restrict",
+                "ips": ips,
+                "blocklist": block,
+                "shield": shield,
+                "message": format!("Restricted {} peer(s) for 7 days — full peer block + shield", ips.len()),
+            })),
+            Err(e) => Json(json!({ "ok": false, "error": e, "blocklist": block })),
+        },
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn peers_unrestrict(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PeerIpsBody>,
+) -> Json<Value> {
+    let ips = normalize_ips(&body.ips);
+    if ips.is_empty() {
+        return Json(json!({ "ok": false, "error": "no IPs selected" }));
+    }
+    match state.fw.remove_peers(&ips).await {
+        Ok(removed) => match state.fw.sync_shield_peers("peer-strict", &[]).await {
+            Ok(shield) => Json(json!({
+                "ok": true,
+                "action": "unrestrict",
+                "ips": ips,
+                "removed": removed,
+                "shield": shield,
+                "message": format!("Removed restriction from {} peer(s)", ips.len()),
+            })),
+            Err(e) => Json(json!({ "ok": false, "error": e, "removed": removed })),
+        },
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ConnectionsQuery {
+    session_hex: Option<String>,
+    ip: Option<String>,
+    #[serde(rename = "type")]
+    conn_type: Option<String>,
+    policy: Option<String>,
+    offenders: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
+async fn connections_query(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ConnectionsQuery>,
+) -> Json<Value> {
+    let offenders_only = q.offenders.as_deref().map(|s| s == "1" || s.eq_ignore_ascii_case("true")).unwrap_or(false);
+    match state
+        .fw
+        .query_connections(
+            q.session_hex.as_deref(),
+            q.ip.as_deref(),
+            q.conn_type.as_deref(),
+            q.policy.as_deref(),
+            offenders_only,
+            q.limit.unwrap_or(25),
+            q.offset.unwrap_or(0),
+        )
+        .await
+    {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+async fn connections_sessions(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match state.fw.list_connection_sessions(40).await {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct OffendersQuery {
+    min_sessions: Option<u32>,
+    limit: Option<u32>,
+}
+
+async fn connections_offenders(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<OffendersQuery>,
+) -> Json<Value> {
+    match state
+        .fw
+        .connection_offenders(q.min_sessions.unwrap_or(2), q.limit.unwrap_or(50))
+        .await
+    {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct ConnectionActionBody {
+    #[serde(default)]
+    ips: Vec<String>,
+    action: String,
+    session_hex: Option<String>,
+}
+
+async fn connections_action(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ConnectionActionBody>,
+) -> Json<Value> {
+    let ips = normalize_ips(&body.ips);
+    if ips.is_empty() {
+        return Json(json!({ "ok": false, "error": "no IPs selected" }));
+    }
+    match state
+        .fw
+        .connections_action(&ips, &body.action, body.session_hex.as_deref())
+        .await
+    {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct InvestigateRunBody {
+    limit: Option<u32>,
+}
+
+async fn investigate_run(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<InvestigateRunBody>,
+) -> Json<Value> {
+    match state.fw.investigate_unknowns(body.limit.unwrap_or(30)).await {
+        Ok(v) => Json(v),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
 async fn session_end(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let ended_hex = peer_tracker::tracker().end_session();
+    if let Some(ref hex) = ended_hex {
+        let _ = state.fw.end_connection_session(hex).await;
+        let _ = state.fw.correlate_probe_sink(hex).await;
+    }
+    state.vps_blocked_ips.lock().clear();
     let ended = engine().end_active_session();
+    if engine().should_decay_blocks() {
+        let _ = state.fw.decay_peer_blocks().await;
+    }
+    game_state::store().clear_session();
     state.scorer.lock().mark_lobby_exit();
     let guard_released = guard().release_if_engaged(&state.fw).await;
     Json(json!({
         "ok": true,
         "session_ended": ended,
+        "session_hex": ended_hex,
         "network_guard_released": guard_released,
         "message": "Left lobby — alerts and desync tuning stopped.",
         "learning": engine().insights(),
@@ -504,8 +980,10 @@ struct FeedbackBody {
 }
 
 async fn feedback_kicked(State(state): State<Arc<AppState>>) -> Json<Value> {
+    game_state::store().ingest(&json!({"type": "kick", "source": "user", "note": "kicked from lobby"}));
     let (verdict, score) = session_verdict(&state);
     engine().record_feedback(true, "kicked from lobby by hacker", &verdict, score);
+    let ended_hex = peer_tracker::tracker().end_session();
     let ended = engine().end_active_session();
     state.scorer.lock().mark_lobby_exit();
     let guard_released = guard().release_if_engaged(&state.fw).await;
@@ -525,6 +1003,7 @@ async fn feedback_kicked(State(state): State<Arc<AppState>>) -> Json<Value> {
         "kicked": true,
         "bad_lobby": true,
         "session_ended": ended,
+        "session_hex": ended_hex,
         "network_guard_released": guard_released,
         "message": "Kicked logged — session ended, defenses released.",
         "learning": engine().insights(),
@@ -555,7 +1034,7 @@ async fn feedback_post(State(state): State<Arc<AppState>>, Json(body): Json<Feed
             75.0,
             "in-match",
             "Warzone",
-            "Cheater lobby confirmed — defenses hardened on Firewalla.",
+            "Cheater lobby confirmed — defenses hardened on array-firewall.",
             &["You reported cheaters in this lobby".into()],
             &json!({"label": "LIKELY", "reasons": ["User confirmed cheaters in session"]}),
             true,
@@ -654,9 +1133,124 @@ async fn xbox_setup_post(Form(form): Form<XboxForm>) -> impl IntoResponse {
     }
 }
 
+fn extract_vps_game_peer_ips(packets: &Value) -> Option<Vec<String>> {
+    let rows = packets
+        .pointer("/metrics/vps_game_peers")
+        .or_else(|| packets.pointer("/metrics/inbound_identical_peers"))
+        .and_then(|v| v.as_array())?;
+    let mut ips = Vec::new();
+    for row in rows {
+        let vps = row.get("vps_probe").and_then(|v| v.as_bool()) == Some(true);
+        let role = row.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if !vps && role != "vps-probe" && role != "game-peer" {
+            continue;
+        }
+        if let Some(ip) = row.get("ip").and_then(|v| v.as_str()) {
+            if !ip.is_empty() {
+                ips.push(ip.to_string());
+            }
+        }
+    }
+    if ips.is_empty() {
+        None
+    } else {
+        Some(ips)
+    }
+}
+
 fn now_secs() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0)
+}
+
+async fn cached_offender_ips(state: &Arc<AppState>, poll_n: u64) -> Vec<String> {
+    let now = now_secs();
+    {
+        let cache = state.offender_ips_cache.lock();
+        if now - cache.0 < 45.0 {
+            return cache.1.clone();
+        }
+    }
+    if poll_n % 8 != 0 {
+        return state.offender_ips_cache.lock().1.clone();
+    }
+    match state.fw.connection_offenders(2, 32).await {
+        Ok(v) => {
+            let ips: Vec<String> = v
+                .get("offenders")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|r| {
+                            r.get("ip")
+                                .and_then(|x| x.as_str())
+                                .map(String::from)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            *state.offender_ips_cache.lock() = (now, ips.clone());
+            ips
+        }
+        Err(_) => state.offender_ips_cache.lock().1.clone(),
+    }
+}
+
+async fn events_post(Json(body): Json<Value>) -> Json<Value> {
+    let store = game_state::store();
+    if let Some(arr) = body.as_array() {
+        Json(store.ingest_batch(arr))
+    } else {
+        Json(store.ingest(&body))
+    }
+}
+
+async fn game_state_get() -> Json<Value> {
+    Json(json!({
+        "ok": true,
+        "game_state": game_state::store().to_json(),
+        "learning": engine().insights(),
+    }))
+}
+
+#[derive(Deserialize, Default)]
+struct GameStateBody {
+    playlist: Option<String>,
+    #[serde(default)]
+    event: Option<Value>,
+}
+
+async fn game_state_post(Json(body): Json<GameStateBody>) -> Json<Value> {
+    if let Some(pl) = body.playlist.filter(|s| !s.is_empty()) {
+        game_state::store().ingest(&json!({"type": "playlist", "playlist": pl}));
+    }
+    if let Some(ev) = body.event {
+        game_state::store().ingest(&ev);
+    }
+    Json(json!({
+        "ok": true,
+        "game_state": game_state::store().to_json(),
+    }))
+}
+
+async fn intel_export() -> Json<Value> {
+    Json(json!({
+        "ok": true,
+        "intel": engine().export_intel(),
+    }))
+}
+
+async fn intel_import(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let learning = engine().import_intel(&body);
+    let firewall = state.fw.import_lobby_intel(body).await.ok();
+    Json(json!({
+        "ok": true,
+        "learning": learning,
+        "firewall": firewall,
+    }))
 }

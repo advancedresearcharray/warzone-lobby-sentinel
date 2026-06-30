@@ -85,6 +85,25 @@ pub fn compress_folds(folds: &[[f32; FOLD_DIM]]) -> Vec<u8> {
     zstd::encode_all(bytes.as_slice(), 3).unwrap_or_default()
 }
 
+pub fn fold_to_b64(fold: &[f32; FOLD_DIM]) -> String {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let bytes: Vec<u8> = fold.iter().flat_map(|f| f.to_le_bytes()).collect();
+    STANDARD.encode(bytes)
+}
+
+pub fn fold_from_b64(payload: &str) -> Option<[f32; FOLD_DIM]> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    let raw = STANDARD.decode(payload.trim()).ok()?;
+    if raw.len() < FOLD_DIM * 4 {
+        return None;
+    }
+    let mut fold = [0.0f32; FOLD_DIM];
+    for d in 0..FOLD_DIM {
+        fold[d] = f32::from_le_bytes(raw[d * 4..d * 4 + 4].try_into().ok()?);
+    }
+    Some(fold)
+}
+
 pub fn decompress_folds(data: &[u8], count: usize) -> Vec<[f32; FOLD_DIM]> {
     let Ok(raw) = zstd::decode_all(data) else {
         return Vec::new();

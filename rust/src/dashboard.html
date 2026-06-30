@@ -51,8 +51,11 @@
       max-width: 1100px;
       margin: 0 auto;
       padding: 1rem;
-      display: grid;
-      gap: 1rem;
+    }
+    .identical-panel {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 1rem 0.5rem;
     }
     .grid { display: grid; gap: 1rem; }
     @media (min-width: 800px) {
@@ -97,6 +100,15 @@
     .stat span:last-child { font-variant-numeric: tabular-nums; }
     .warn { color: var(--possible); }
     .bad { color: var(--likely); }
+    tr.warn-row td { color: var(--warn, #e6a817); }
+    tr.warn-row td:first-child { font-weight: 600; }
+    tr.muted-row td { color: var(--muted, #8a9199); }
+    tr.restricted-row td { background: rgba(239, 68, 68, 0.08); }
+    tr.restricted-row td.status-cell { color: var(--likely); font-weight: 600; }
+    tr.vps-row td { background: rgba(239, 68, 68, 0.12); }
+    tr.vps-row td:nth-child(3) { color: var(--likely); font-weight: 600; }
+    .peer-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 0.65rem; align-items: center; }
+    .peer-actions label { font-size: 0.82rem; color: var(--muted); display: inline-flex; align-items: center; gap: 0.35rem; }
     .actions {
       display: flex;
       flex-wrap: wrap;
@@ -211,7 +223,16 @@
     .cheater-answer.yes { color: var(--likely); }
     .cheater-answer.maybe { color: var(--possible); }
     .cheater-answer.no { color: var(--clean); }
-    .defense-note {
+    .stat .good { color: var(--clean); }
+    .stat .warn-text { color: var(--possible); }
+    .conn-pagination {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem 0.75rem;
+      margin-bottom: 0.5rem;
+    }
+    .conn-pagination button:disabled { opacity: 0.45; cursor: not-allowed; }
       font-size: 0.88rem;
       color: var(--muted);
       margin-top: 0.5rem;
@@ -227,6 +248,46 @@
       padding: 0.25rem 0;
       color: var(--muted);
     }
+    /* ── Tabs ── */
+    .tabs-wrap {
+      border-bottom: 1px solid var(--border);
+      background: #0d1219;
+      position: sticky;
+      top: 52px;
+      z-index: 9;
+    }
+    .tabs {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: flex;
+      gap: 0;
+      overflow-x: auto;
+      padding: 0 1rem;
+      scrollbar-width: none;
+    }
+    .tabs::-webkit-scrollbar { display: none; }
+    .tab {
+      padding: 0.65rem 1rem;
+      border: none;
+      background: none;
+      color: var(--muted);
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      white-space: nowrap;
+      transition: color 0.15s, border-color 0.15s;
+      border-radius: 0;
+    }
+    .tab:hover { color: var(--text); opacity: 1; }
+    .tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .tab-panel { display: none; animation: fadeIn 0.2s ease; }
+    .tab-panel.active { display: grid; gap: 1rem; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
   </style>
 </head>
 <body>
@@ -241,7 +302,43 @@
     </div>
   </header>
 
+  <nav class="tabs-wrap" aria-label="Dashboard sections">
+    <div class="tabs" role="tablist">
+      <button class="tab active" data-tab="overview" role="tab" aria-selected="true">Overview</button>
+      <button class="tab" data-tab="ai" role="tab">AI</button>
+      <button class="tab" data-tab="defenses" role="tab">Defenses</button>
+      <button class="tab" data-tab="traffic" role="tab">Traffic</button>
+      <button class="tab" data-tab="connections" role="tab">Connections DB</button>
+      <button class="tab" data-tab="security" role="tab">Security</button>
+    </div>
+  </nav>
+
+  <section class="card identical-panel" id="identicalPeersPanel">
+    <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0.5rem;margin-bottom:0.5rem">
+      <div>
+        <h2 style="margin:0">Inbound IPs — identical packet count</h2>
+        <p class="muted" style="margin:0.25rem 0 0;font-size:0.82rem">Session <span class="mono" id="sessionHex">—</span> · accumulates until you clear or leave lobby</p>
+      </div>
+      <button class="btn-ghost" id="btnClearPeers" type="button">Clear table (save snapshot)</button>
+    </div>
+    <div class="peer-actions">
+      <button class="btn-primary" id="btnShieldPeers" type="button">Shield selected</button>
+      <button class="btn-danger" id="btnRestrictPeers" type="button">Restrict selected (7d)</button>
+      <button class="btn-ghost" id="btnUnrestrictPeers" type="button">Remove restriction</button>
+      <button class="btn-ghost" id="btnSelectVps" type="button">Select VPS probes</button>
+      <label><input type="checkbox" id="peerSelectAll"> Select all</label>
+      <span class="muted" id="peerSelectCount" style="font-size:0.82rem">0 selected</span>
+    </div>
+    <p class="muted" id="identicalPeersHint" style="margin:0 0 0.65rem;font-size:0.82rem"><strong>Peak size</strong> = largest identical burst · <strong>Size spread</strong> = min–max bytes this session (<span class="bad">fixed</span> = probe pattern) · Shield / Restrict apply on array-firewall</p>
+    <table class="mono">
+      <thead><tr><th></th><th>IP</th><th>Label / role</th><th>Identical</th><th>Peak (B)</th><th>Size spread</th><th>Total in</th><th>Tiny</th><th>Polls</th><th>Status</th></tr></thead>
+      <tbody id="identicalPeersOverview"></tbody>
+    </table>
+  </section>
+
   <main>
+    <!-- ═══ OVERVIEW ═══ -->
+    <div class="tab-panel active" id="panel-overview" role="tabpanel">
     <section class="card verdict CLEAN" id="verdictCard">
       <div class="verdict-label" id="verdictLabel">—</div>
       <div class="cheater-answer" id="cheaterAnswer">Analyzing lobby…</div>
@@ -251,38 +348,15 @@
       <div class="rec" id="recommendation"></div>
     </section>
 
-    <section class="card" id="aiCard">
-      <h2>AI Advisor</h2>
-      <p id="aiSummary" class="ai-summary">Analyzing…</p>
-      <div class="grid grid-3" style="margin-bottom:0.75rem">
-        <div class="stat"><span>Bad probability</span><span id="aiProb">—</span></div>
-        <div class="stat"><span>Trend</span><span id="aiTrend">—</span></div>
-        <div class="stat"><span>AI calibration</span><span id="aiCalib">—</span></div>
-      </div>
-      <div class="spark" id="scoreSpark" title="Score history"></div>
-      <div class="grid grid-2" style="margin-top:1rem">
-        <div>
-          <h2>Score breakdown</h2>
-          <ul class="reasons" id="aiBreakdown"></ul>
-        </div>
-        <div>
-          <h2>AI recommendations</h2>
-          <ul class="reasons" id="aiRecs"></ul>
-        </div>
-      </div>
-      <h2 style="margin-top:1rem">Similar past lobbies (32D fold)</h2>
-      <ul class="reasons" id="aiSimilar"></ul>
-    </section>
-
     <section class="card">
       <h2>Actions</h2>
       <div class="actions">
-        <button class="btn-primary" id="btnInMatch">I am in a match</button>
-        <button class="btn-danger" id="btnBad">Mark cheater lobby</button>
-        <button class="btn-kicked" id="btnKicked" title="Use when a hacker kicked you from the lobby">Kicked from lobby</button>
-        <button class="btn-ghost" id="btnReleaseDefenses" title="Stop buffer/flood tuning if gameplay is glitching">Stop defenses (fix glitching)</button>
-        <button class="btn-success" id="btnClean" title="Only use when this lobby had no cheaters">Good lobby (no cheaters)</button>
-        <button class="btn-ghost" id="btnLeft">Left lobby</button>
+        <button type="button" class="btn-primary" id="btnInMatch">I am in a match</button>
+        <button type="button" class="btn-danger" id="btnBad">Mark cheater lobby</button>
+        <button type="button" class="btn-kicked" id="btnKicked" title="Use when a hacker kicked you from the lobby">Kicked from lobby</button>
+        <button type="button" class="btn-ghost" id="btnReleaseDefenses" title="Stop buffer/flood tuning if gameplay is glitching">Stop defenses (fix glitching)</button>
+        <button type="button" class="btn-success" id="btnClean" title="Only use when this lobby had no cheaters">Good lobby (no cheaters)</button>
+        <button type="button" class="btn-ghost" id="btnLeft">Left lobby</button>
       </div>
     </section>
 
@@ -295,7 +369,10 @@
         <div class="stat"><span>Game</span><span id="game">—</span></div>
       </section>
       <section class="card">
-        <h2>Latency</h2>
+        <h2>Latency &amp; path</h2>
+        <div class="stat"><span>Xbox path</span><span id="xboxPath">Wired · MoCA</span></div>
+        <div class="stat"><span>LAN → Xbox</span><span id="xboxLanLat">—</span></div>
+        <div class="stat"><span>MoCA QoS (DSCP)</span><span id="mocaQos">—</span></div>
         <div class="stat"><span>WAN ping</span><span id="wanLat">—</span></div>
         <div class="stat"><span>WAN jitter</span><span id="wanJit">—</span></div>
         <div class="stat"><span>Game servers</span><span id="srvLat">—</span></div>
@@ -322,12 +399,46 @@
       </section>
     </div>
 
+    </div>
+
+    <!-- ═══ AI ═══ -->
+    <div class="tab-panel" id="panel-ai" role="tabpanel">
+    <section class="card" id="aiCard">
+      <h2>AI Advisor</h2>
+      <p id="aiSummary" class="ai-summary">Analyzing…</p>
+      <div class="grid grid-3" style="margin-bottom:0.75rem">
+        <div class="stat"><span>Bad probability</span><span id="aiProb">—</span></div>
+        <div class="stat"><span>Trend</span><span id="aiTrend">—</span></div>
+        <div class="stat"><span>AI calibration</span><span id="aiCalib">—</span></div>
+      </div>
+      <div class="spark" id="scoreSpark" title="Score history"></div>
+      <div class="grid grid-2" style="margin-top:1rem">
+        <div>
+          <h2>Score breakdown</h2>
+          <ul class="reasons" id="aiBreakdown"></ul>
+        </div>
+        <div>
+          <h2>AI recommendations</h2>
+          <ul class="reasons" id="aiRecs"></ul>
+        </div>
+      </div>
+      <h2 style="margin-top:1rem">Similar past lobbies (32D fold)</h2>
+      <ul class="reasons" id="aiSimilar"></ul>
+    </section>
+    </div>
+
+    <!-- ═══ DEFENSES ═══ -->
+    <div class="tab-panel" id="panel-defenses" role="tabpanel">
     <div class="grid grid-2">
       <section class="card">
         <h2>Network guard</h2>
         <div class="stat"><span>Mode</span><span id="guardMode">—</span></div>
         <div class="stat"><span>Desync profile</span><span id="guardEngage">—</span></div>
         <div class="stat"><span>Flood guard</span><span id="floodGuard">—</span></div>
+        <div class="stat"><span>MoCA QoS</span><span id="mocaQosDefense">—</span></div>
+        <div class="stat"><span>In-match shield</span><span id="inMatchShield">—</span></div>
+        <div class="stat"><span>Upload assist</span><span id="uploadAssist">—</span></div>
+        <div class="stat"><span>Upload pressure</span><span id="uploadPressure">—</span></div>
         <div class="stat"><span>Last auto alert</span><span id="lastAlert">—</span></div>
       </section>
       <section class="card">
@@ -338,58 +449,16 @@
         <ul class="reasons" id="patterns"></ul>
       </section>
     </div>
+    </div>
 
-    <section class="card">
-      <h2>Packet capture &amp; cheat inspection</h2>
-      <p id="packetSummary" class="ai-summary">Waiting for tcpdump capture…</p>
-      <div class="grid grid-3" style="margin-bottom:0.75rem">
-        <div class="stat"><span>Packet verdict</span><span id="packetVerdict">—</span></div>
-        <div class="stat"><span>Packet score</span><span id="packetScore">—</span></div>
-        <div class="stat"><span>Captured</span><span id="packetCaptured">—</span></div>
-      </div>
-      <div class="grid grid-3" style="margin-bottom:0.75rem">
-        <div class="stat"><span>Inbound packets</span><span id="pktIn">—</span></div>
-        <div class="stat"><span>Tiny inbound</span><span id="pktTiny">—</span></div>
-        <div class="stat"><span>Peer tiny inbound</span><span id="pktPeerTiny">—</span></div>
-        <div class="stat"><span>Suspicious peers</span><span id="pktPeerCount">—</span></div>
-      </div>
-      <h2>Suspicious game peers</h2>
-      <ul class="reasons" id="suspiciousPeers"></ul>
-      <div class="actions" style="margin-bottom:0.75rem">
-        <button class="btn-primary" id="btnDeepCapture">Deep capture now</button>
-      </div>
-      <h2>Packet alerts</h2>
-      <ul class="reasons" id="packetAlerts"></ul>
-      <h2 class="traffic-sub">Captured packets</h2>
-      <table class="mono">
-        <thead><tr><th>Dir</th><th>Proto</th><th>Remote</th><th>Port</th><th>Len</th><th>Flags</th></tr></thead>
-        <tbody id="packetBody"></tbody>
-      </table>
-    </section>
-
-    <section class="card">
-      <h2>Inbound cheat analysis</h2>
-      <p id="inboundSummary" class="ai-summary">Inspecting incoming packets…</p>
-      <div class="grid grid-3" style="margin-bottom:0.75rem">
-        <div class="stat"><span>Inbound verdict</span><span id="inboundVerdict">—</span></div>
-        <div class="stat"><span>Inbound score</span><span id="inboundScore">—</span></div>
-        <div class="stat"><span>Inbound Mbps</span><span id="inboundMbps">—</span></div>
-      </div>
-      <div class="grid grid-3" style="margin-bottom:0.75rem">
-        <div class="stat"><span>Download (flows)</span><span id="inboundDl">—</span></div>
-        <div class="stat"><span>DL/UL ratio</span><span id="inboundRatio">—</span></div>
-        <div class="stat"><span>Unknown inbound conns</span><span id="inboundUnknown">—</span></div>
-      </div>
-      <h2>Inbound alerts</h2>
-      <ul class="reasons" id="inboundAlerts"></ul>
-    </section>
-
+    <!-- ═══ TRAFFIC ═══ -->
+    <div class="tab-panel" id="panel-traffic" role="tabpanel">
     <section class="card">
       <h2>Traffic inspector</h2>
       <div class="traffic-toolbar">
-        <span class="tag active" data-traffic-dir="out">Outbound</span>
+        <span class="tag" data-traffic-dir="out">Outbound</span>
         <span class="tag" data-traffic-dir="in">Inbound</span>
-        <span class="tag" data-traffic-dir="all">All</span>
+        <span class="tag active" data-traffic-dir="all">All</span>
         <span class="meta" id="trafficMeta"></span>
       </div>
       <div class="grid grid-3 traffic-summary">
@@ -418,6 +487,133 @@
         <tbody id="hosts"></tbody>
       </table>
     </section>
+    </div>
+
+    <!-- ═══ CONNECTIONS DB ═══ -->
+    <div class="tab-panel" id="panel-connections" role="tabpanel">
+    <section class="card">
+      <h2>Connection history (lite DB)</h2>
+      <p class="muted" style="font-size:0.82rem;margin:0 0 0.75rem"><strong>unknown</strong> = no match in server-roles (hostname/CIDR/port rules) — the built-in agent runs PTR + WHOIS + behavior analysis automatically and updates the row.</p>
+      <div class="peer-actions" style="margin-bottom:0.75rem">
+        <label>Session <select id="connFilterSession"><option value="">All sessions</option></select></label>
+        <label>IP <input type="text" id="connFilterIp" placeholder="1.2.3.4" style="width:7rem"></label>
+        <label>Type <select id="connFilterType">
+          <option value="">All types</option>
+          <option value="dedicated-server">dedicated-server</option>
+          <option value="p2p-mesh">p2p-mesh</option>
+          <option value="vps-probe">vps-probe</option>
+          <option value="game-peer">game-peer (legacy)</option>
+          <option value="unknown">unknown</option>
+          <option value="warzone-game">warzone-game</option>
+          <option value="telemetry">telemetry</option>
+          <option value="matchmaking">matchmaking</option>
+        </select></label>
+        <label>Policy <select id="connFilterPolicy">
+          <option value="">Any policy</option>
+          <option value="none">none</option>
+          <option value="protect">protect</option>
+          <option value="block">block</option>
+        </select></label>
+        <label><input type="checkbox" id="connFilterOffenders"> Repeat offenders (2+ sessions)</label>
+        <button class="btn-ghost" id="btnConnRefresh" type="button">Refresh</button>
+      </div>
+      <div class="peer-actions" style="margin-bottom:0.75rem">
+        <button class="btn-primary" id="btnConnProtect" type="button">Protect selected</button>
+        <button class="btn-danger" id="btnConnBlock" type="button">Block selected</button>
+        <button class="btn-ghost" id="btnConnNoProtect" type="button">No protect</button>
+        <button class="btn-ghost" id="btnConnRemove" type="button">Remove from table</button>
+        <button class="btn-ghost" id="btnConnInvestigate" type="button">Investigate unknowns</button>
+        <label><input type="checkbox" id="connSelectAll"> Select all</label>
+        <span class="muted" id="connSelectCount" style="font-size:0.82rem">0 selected</span>
+      </div>
+      <p class="muted" id="connMeta" style="font-size:0.82rem;margin:0 0 0.5rem">—</p>
+      <div class="conn-pagination">
+        <button class="btn-ghost" id="btnConnPrev" type="button" disabled>← Prev</button>
+        <button class="btn-ghost" id="btnConnNext" type="button" disabled>Next →</button>
+        <span class="muted" id="connPageInfo" style="font-size:0.82rem">Page 1</span>
+        <label style="font-size:0.82rem">Per page
+          <select id="connPageSize">
+            <option value="25" selected>25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+        </label>
+      </div>
+      <table class="mono">
+        <thead><tr><th></th><th>IP</th><th>Type</th><th>Label</th><th>Intel / purpose</th><th>Sessions</th><th>Identical</th><th>Tiny</th><th>Last seen</th><th>Session</th><th>Policy</th></tr></thead>
+        <tbody id="connDbBody"></tbody>
+      </table>
+    </section>
+    <section class="card">
+      <h2>Repeat offenders</h2>
+      <table class="mono">
+        <thead><tr><th>IP</th><th>Sessions</th><th>Types</th><th>Label</th><th>Identical</th><th>Policy</th></tr></thead>
+        <tbody id="connOffendersBody"></tbody>
+      </table>
+    </section>
+    </div>
+
+    <!-- ═══ SECURITY ═══ -->
+    <div class="tab-panel" id="panel-security" role="tabpanel">
+    <section class="card">
+      <h2>Packet capture &amp; cheat inspection</h2>
+      <p id="packetSummary" class="ai-summary">Waiting for tcpdump capture…</p>
+      <div class="grid grid-3" style="margin-bottom:0.75rem">
+        <div class="stat"><span>Packet verdict</span><span id="packetVerdict">—</span></div>
+        <div class="stat"><span>Packet score</span><span id="packetScore">—</span></div>
+        <div class="stat"><span>Captured</span><span id="packetCaptured">—</span></div>
+      </div>
+      <div class="grid grid-3" style="margin-bottom:0.75rem">
+        <div class="stat"><span>Inbound packets</span><span id="pktIn">—</span></div>
+        <div class="stat"><span>Tiny inbound</span><span id="pktTiny">—</span></div>
+        <div class="stat"><span>Peer tiny inbound</span><span id="pktPeerTiny">—</span></div>
+        <div class="stat"><span>Suspicious peers</span><span id="pktPeerCount">—</span></div>
+      </div>
+      <h2 class="traffic-sub">Suspicious game peers</h2>
+      <ul class="reasons" id="suspiciousPeers"></ul>
+      <div class="actions" style="margin-bottom:0.75rem">
+        <button class="btn-primary" id="btnDeepCapture">Deep capture now</button>
+      </div>
+      <h2>Packet alerts</h2>
+      <ul class="reasons" id="packetAlerts"></ul>
+      <h2 class="traffic-sub">Captured packets</h2>
+      <table class="mono">
+        <thead><tr><th>Dir</th><th>Proto</th><th>Remote</th><th>Port</th><th>Len</th><th>Flags</th></tr></thead>
+        <tbody id="packetBody"></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>Information Flow Complexity</h2>
+      <p class="ai-summary">Flow(M,x,t) = H(State<sub>t</sub> | State<sub>t−1</sub>) · <a href="https://zenodo.org/records/17373031" target="_blank" rel="noopener">Zenodo 17373031</a></p>
+      <div class="grid grid-3" style="margin-bottom:0.75rem">
+        <div class="stat"><span>Step flow</span><span id="ifcFlowBits">—</span></div>
+        <div class="stat"><span>Total flow</span><span id="ifcTotalFlow">—</span></div>
+        <div class="stat"><span>IFC steps</span><span id="ifcSteps">—</span></div>
+        <div class="stat"><span>Byte flow</span><span id="ifcByteFlow">—</span></div>
+        <div class="stat"><span>Super-linear</span><span id="ifcSuperlinear">—</span></div>
+        <div class="stat"><span>PRG-like</span><span id="ifcPrg">—</span></div>
+      </div>
+      <ul class="reasons" id="ifcAlerts"></ul>
+    </section>
+
+    <section class="card">
+      <h2>Inbound cheat analysis</h2>
+      <p id="inboundSummary" class="ai-summary">Inspecting incoming packets…</p>
+      <div class="grid grid-3" style="margin-bottom:0.75rem">
+        <div class="stat"><span>Inbound verdict</span><span id="inboundVerdict">—</span></div>
+        <div class="stat"><span>Inbound score</span><span id="inboundScore">—</span></div>
+        <div class="stat"><span>Inbound Mbps</span><span id="inboundMbps">—</span></div>
+      </div>
+      <div class="grid grid-3" style="margin-bottom:0.75rem">
+        <div class="stat"><span>Download (flows)</span><span id="inboundDl">—</span></div>
+        <div class="stat"><span>DL/UL ratio</span><span id="inboundRatio">—</span></div>
+        <div class="stat"><span>Unknown inbound conns</span><span id="inboundUnknown">—</span></div>
+      </div>
+      <h2>Inbound alerts</h2>
+      <ul class="reasons" id="inboundAlerts"></ul>
+    </section>
+    </div>
   </main>
 
   <div id="toast"></div>
@@ -425,7 +621,267 @@
   <script>
     const $ = id => document.getElementById(id);
     let busy = false;
-    let trafficDir = 'out';
+    let trafficDir = 'all';
+    const tabKey = 'wz-sentinel-tab';
+    const selectedPeerIps = new Set();
+
+    function updatePeerSelectCount() {
+      const el = $('peerSelectCount');
+      if (el) el.textContent = selectedPeerIps.size + ' selected';
+      const all = $('peerSelectAll');
+      if (all) {
+        const boxes = document.querySelectorAll('.peerPick');
+        all.checked = boxes.length > 0 && selectedPeerIps.size === boxes.length;
+        all.indeterminate = selectedPeerIps.size > 0 && selectedPeerIps.size < boxes.length;
+      }
+    }
+
+    function selectedPeerList() {
+      return [...selectedPeerIps];
+    }
+
+    function peerStatusLabel(p) {
+      if (p.confirmed === false || p.role === 'p2p-mesh' || p.role === 'p2p-unconfirmed') return 'UNCONFIRMED';
+      if (p.confirmed === true || p.role === 'vps-probe' || p.role === 'game-peer') return 'CONFIRMED';
+      if (!p.restricted && !p.shielded) return '—';
+      const reason = (p.restriction_reason || '').toLowerCase();
+      if (reason.includes('restrict')) return 'RESTRICT';
+      if (reason.includes('shield')) return 'SHIELD';
+      return 'BLOCKED';
+    }
+
+    function peerIsVpsProbe(p) {
+      if (p.vps_probe || p.role === 'vps-probe') return true;
+      if (p.role !== 'vps-probe' && p.role !== 'game-peer') return false;
+      const label = (p.label || p.vendor || '').toLowerCase();
+      return label.includes('vultr') || label.includes('vps') || label.includes('linode')
+        || label.includes('aws') || label.includes('cloud') || label.includes('digitalocean');
+    }
+
+    function activateTab(name) {
+      document.querySelectorAll('.tab').forEach(t => {
+        const on = t.dataset.tab === name;
+        t.classList.toggle('active', on);
+        t.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      document.querySelectorAll('.tab-panel').forEach(p => {
+        p.classList.toggle('active', p.id === 'panel-' + name);
+      });
+      try { localStorage.setItem(tabKey, name); } catch (_) {}
+      if (name === 'traffic') loadTraffic(trafficDir);
+      if (name === 'connections') loadConnectionsDb();
+    }
+
+    const selectedConnIps = new Set();
+    let connDbPage = 0;
+    let connDbPageSize = 25;
+    let connDbTotal = 0;
+    let connSessionsLoaded = false;
+    let connOffendersLoaded = false;
+
+    function resetConnDbPage() {
+      connDbPage = 0;
+    }
+
+    function updateConnPagination() {
+      const info = $('connPageInfo');
+      const prev = $('btnConnPrev');
+      const next = $('btnConnNext');
+      if (!info || !prev || !next) return;
+      const totalPages = Math.max(1, Math.ceil(connDbTotal / connDbPageSize));
+      const start = connDbTotal ? connDbPage * connDbPageSize + 1 : 0;
+      const end = Math.min(connDbTotal, (connDbPage + 1) * connDbPageSize);
+      info.textContent = connDbTotal
+        ? `Page ${connDbPage + 1} of ${totalPages} · rows ${start}–${end} of ${connDbTotal}`
+        : 'Page 1 · no rows';
+      prev.disabled = connDbPage <= 0;
+      next.disabled = connDbTotal === 0 || (connDbPage + 1) * connDbPageSize >= connDbTotal;
+    }
+
+    function updateConnSelectCount() {
+      const el = $('connSelectCount');
+      if (el) el.textContent = selectedConnIps.size + ' selected';
+      const all = $('connSelectAll');
+      if (all) {
+        const boxes = document.querySelectorAll('.connPick');
+        all.checked = boxes.length > 0 && selectedConnIps.size === boxes.length;
+        all.indeterminate = selectedConnIps.size > 0 && selectedConnIps.size < boxes.length;
+      }
+    }
+
+    function fmtTs(ts) {
+      if (!ts) return '—';
+      return new Date(ts * 1000).toLocaleString();
+    }
+
+    function connPolicyBadge(pol) {
+      if (pol === 'protect') return 'PROTECT';
+      if (pol === 'block') return 'BLOCK';
+      return '—';
+    }
+
+    async function loadConnSessions() {
+      try {
+        const r = await fetch('/v1/connections/sessions');
+        const j = await r.json();
+        const sel = $('connFilterSession');
+        if (!sel) return;
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">All sessions</option>';
+        (j.sessions || []).forEach(s => {
+          const opt = document.createElement('option');
+          opt.value = s.session_hex;
+          const ended = s.ended_at ? ' ended' : '';
+          opt.textContent = `${(s.session_hex || '').slice(0, 8)}… · ${s.phase || '?'}${ended} (${s.conn_count || 0})`;
+          sel.appendChild(opt);
+        });
+        if (cur) sel.value = cur;
+      } catch (_) {}
+    }
+
+    async function loadConnOffenders() {
+      try {
+        const r2 = await fetch('/v1/connections/offenders?min_sessions=2&limit=15');
+        const j2 = await r2.json();
+        const ob = $('connOffendersBody');
+        ob.innerHTML = '';
+        const list = j2.offenders || [];
+        if (!list.length) {
+          ob.innerHTML = '<tr><td colspan="6">No repeat offenders yet</td></tr>';
+        } else {
+          list.forEach(o => {
+            const tr = document.createElement('tr');
+            tr.innerHTML =
+              `<td>${o.ip}</td>` +
+              `<td>${o.session_count}</td>` +
+              `<td>${(o.conn_types || []).join(', ') || '—'}</td>` +
+              `<td>${o.label || '—'}</td>` +
+              `<td>${o.identical_max ?? '—'}</td>` +
+              `<td>${connPolicyBadge(o.policy)}</td>`;
+            ob.appendChild(tr);
+          });
+        }
+        connOffendersLoaded = true;
+      } catch (_) {}
+    }
+
+    async function loadConnectionsDb(opts = {}) {
+      const reloadSessions = opts.reloadSessions === true || !connSessionsLoaded;
+      if (reloadSessions) {
+        await loadConnSessions();
+        connSessionsLoaded = true;
+      }
+      const params = new URLSearchParams();
+      const session = ($('connFilterSession') || {}).value;
+      const ip = ($('connFilterIp') || {}).value;
+      const typ = ($('connFilterType') || {}).value;
+      const pol = ($('connFilterPolicy') || {}).value;
+      const offenders = ($('connFilterOffenders') || {}).checked;
+      if (session) params.set('session_hex', session);
+      if (ip) params.set('ip', ip.trim());
+      if (typ) params.set('type', typ);
+      if (pol) params.set('policy', pol);
+      if (offenders) params.set('offenders', '1');
+      connDbPageSize = parseInt(($('connPageSize') || {}).value || '25', 10) || 25;
+      params.set('limit', String(connDbPageSize));
+      params.set('offset', String(connDbPage * connDbPageSize));
+      const body = $('connDbBody');
+      if (body) body.innerHTML = '<tr><td colspan="11" class="muted">Loading…</td></tr>';
+      try {
+        const r = await fetch('/v1/connections?' + params.toString());
+        const j = await r.json();
+        body.innerHTML = '';
+        const rows = j.rows || [];
+        window.__connRows = rows;
+        connDbTotal = j.total != null ? j.total : rows.length;
+        if (!rows.length) {
+          body.innerHTML = '<tr><td colspan="11">No connections match this page/filter</td></tr>';
+        } else {
+          rows.forEach(row => {
+            const tr = document.createElement('tr');
+            if (row.policy === 'block') tr.className = 'restricted-row';
+            else if (row.policy === 'protect') tr.className = 'warn-row';
+            else if (row.vps_probe || row.suspicious) tr.className = 'vps-row';
+            else if (row.conn_type === 'unknown') tr.className = 'warn-row';
+            const ipAddr = row.ip || '';
+            const checked = selectedConnIps.has(ipAddr) ? ' checked' : '';
+            const intel = row.intel || {};
+            const intelTxt = intel.purpose || (intel.status === 'pending' ? 'Investigating…' : '—');
+            const typeCell = row.conn_type === 'unknown'
+              ? `<span class="bad">unknown</span>`
+              : (row.conn_type || '—');
+            tr.innerHTML =
+              `<td><input type="checkbox" class="connPick" data-ip="${ipAddr}"${checked}></td>` +
+              `<td>${ipAddr}</td>` +
+              `<td>${typeCell}</td>` +
+              `<td>${row.label || '—'}</td>` +
+              `<td style="max-width:16rem;white-space:normal;font-size:0.75rem">${intelTxt}</td>` +
+              `<td>${row.session_count ?? 1}</td>` +
+              `<td>${row.identical_max ?? '—'}</td>` +
+              `<td>${row.tiny_packets ?? '—'}</td>` +
+              `<td>${fmtTs(row.last_seen)}</td>` +
+              `<td class="mono">${(row.session_hex || '').slice(0, 8)}…</td>` +
+              `<td>${connPolicyBadge(row.policy)}</td>`;
+            body.appendChild(tr);
+          });
+        }
+        $('connMeta').textContent = j.ok
+          ? `${rows.length} row(s) on this page · ${connDbTotal} matching filter`
+          : (j.error || 'Query failed');
+        updateConnPagination();
+        updateConnSelectCount();
+      } catch (e) {
+        if (body) body.innerHTML = '<tr><td colspan="11">Failed to load connections</td></tr>';
+        $('connMeta').textContent = 'Failed to load connections';
+        updateConnPagination();
+      }
+      if (!connOffendersLoaded || opts.reloadOffenders) {
+        loadConnOffenders();
+      }
+    }
+
+    async function connDbAction(action) {
+      const ips = [...selectedConnIps];
+      if (!ips.length) {
+        toast('Select at least one IP');
+        return;
+      }
+      const session_hex = ($('connFilterSession') || {}).value || null;
+      const body = { ips, action };
+      if (session_hex) body.session_hex = session_hex;
+      await actionPost('/v1/connections/action', body);
+      await loadConnectionsDb();
+    }
+
+    async function actionPost(url, body) {
+      await action(url, body);
+    }
+
+    function renderIdenticalPeersPanel(peerTracker) {
+      const pt = peerTracker || {};
+      const phase = pt.phase || '';
+      const gaming = phase === 'matchmaking' || phase === 'in-match';
+      const rows = gaming ? (pt.peers || []) : [];
+      window.__peerRows = rows;
+      $('sessionHex').textContent = gaming ? (pt.session_hex || '—') : '—';
+      renderIdenticalPeers($('identicalPeersOverview'), rows);
+      const panel = $('identicalPeersPanel');
+      if (panel) panel.style.display = '';
+      const hint = $('identicalPeersHint');
+      if (hint) {
+        hint.textContent = gaming
+          ? ''
+          : (phase ? `Xbox idle (${phase}) — peer table clears until you queue or enter a match.` : '');
+      }
+    }
+
+    document.querySelectorAll('.tab').forEach(t => {
+      t.addEventListener('click', () => activateTab(t.dataset.tab));
+    });
+    try {
+      const saved = localStorage.getItem(tabKey);
+      if (saved && document.getElementById('panel-' + saved)) activateTab(saved);
+    } catch (_) {}
 
     function bytes(v) {
       if (v == null || v === '') return '—';
@@ -438,14 +894,31 @@
     function renderTraffic(tr) {
       if (!tr) return;
       const sum = tr.summary || {};
-      $('trConns').textContent = (tr.connections || []).length
-        + (sum.connections_total != null ? ' / ' + sum.connections_total : '');
+      const listN = (tr.connections || []).length;
+      const total = sum.connections_total;
+      const outN = sum.connections_out;
+      const inN = sum.connections_in;
+      const dir = tr.direction || trafficDir;
+      let connLabel = String(listN);
+      if (total != null) {
+        if (dir === 'in') connLabel = `${listN} inbound / ${total} total`;
+        else if (dir === 'out') connLabel = `${listN} outbound / ${total} total`;
+        else connLabel = `${listN} shown / ${total} total`;
+        if (outN != null && inN != null && dir === 'all') {
+          connLabel += ` (${outN} out · ${inN} in)`;
+        }
+      }
+      $('trConns').textContent = connLabel;
       $('trUpload').textContent = bytes(sum.xbox_upload_bytes ?? sum.outbound_upload_bytes ?? sum.sample_bytes_out);
       $('trDownload').textContent = bytes(sum.xbox_download_bytes ?? sum.outbound_download_bytes ?? sum.sample_bytes_in);
       const win = sum.sample_window_sec;
-      $('trafficMeta').textContent = win != null
-        ? `${tr.direction || trafficDir} · ${win}s sample window`
-        : (tr.direction || trafficDir);
+      let meta = win != null
+        ? `${dir} · ${win}s sample window`
+        : dir;
+      if (sum.connections_truncated && total != null && sum.connections_shown != null) {
+        meta += ` · ${total - sum.connections_shown} conn(s) not loaded (snapshot cap)`;
+      }
+      $('trafficMeta').textContent = meta;
 
       $('trRoles').innerHTML = (tr.by_role || [])
         .map(r => `<span class="tag">${r.role}: ${r.count}</span>`)
@@ -453,11 +926,11 @@
 
       const cbody = $('trConnsBody');
       cbody.innerHTML = '';
-      (tr.connections || []).slice(0, 24).forEach(c => {
+      (tr.connections || []).slice(0, 96).forEach(c => {
         const trEl = document.createElement('tr');
-        const dir = c.direction || 'out';
+        const rowDir = c.direction || 'out';
         trEl.innerHTML =
-          `<td class="dir-${dir}">${dir}</td>` +
+          `<td class="dir-${rowDir}">${rowDir}</td>` +
           `<td>${c.hostname || c.ip || '—'}</td>` +
           `<td>${c.role || '—'}</td>` +
           `<td>${c.remote || '—'}</td>` +
@@ -467,7 +940,12 @@
         cbody.appendChild(trEl);
       });
       if (!(tr.connections || []).length) {
-        cbody.innerHTML = '<tr><td colspan="7">No connections in this direction</td></tr>';
+        const hint = dir === 'in'
+          ? 'No inbound connections in snapshot — try All, or wait for next poll'
+          : dir === 'out'
+            ? 'No outbound connections in snapshot'
+            : 'No connections in snapshot';
+        cbody.innerHTML = `<tr><td colspan="7">${hint}</td></tr>`;
       }
 
       const fbody = $('trFlowsBody');
@@ -510,6 +988,18 @@
       setTimeout(() => t.classList.remove('show'), 2800);
     }
 
+    async function fetchTimed(url, opts = {}, ms = 8000) {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), ms);
+      try {
+        return await fetch(url, { ...opts, signal: ctrl.signal });
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    let refreshInFlight = false;
+
     function ms(v) {
       if (v == null || v === '') return '—';
       return Number(v).toFixed(1) + ' ms';
@@ -535,20 +1025,96 @@
       });
     }
 
-    async function action(url, body) {
+    function formatSizeSpread(p) {
+      const min = p.packet_size_min != null ? Number(p.packet_size_min) : 0;
+      const max = p.packet_size_max != null ? Number(p.packet_size_max) : 0;
+      if (!min && !max) return '—';
+      if (!max) return String(min);
+      if (min === max) return `<span class="bad" title="Fixed size — probe pattern">${min}</span>`;
+      return `${min}–${max}`;
+    }
+
+    function renderIdenticalPeers(bodyEl, rows) {
+      if (!bodyEl) return;
+      bodyEl.innerHTML = '';
+      if (!Array.isArray(rows) || !rows.length) {
+        bodyEl.innerHTML = '<tr><td colspan="10">No inbound peers yet — capture runs during matchmaking or in-match</td></tr>';
+        updatePeerSelectCount();
+        return;
+      }
+      rows.slice(0, 40).forEach(p => {
+        const ip = p.ip || p.remote || '';
+        const tr = document.createElement('tr');
+        const identical = p.identical_count != null ? p.identical_count : (p.max_burst ?? '—');
+        const size = p.identical_size != null ? p.identical_size : '—';
+        const spread = formatSizeSpread(p);
+        const label = p.label || p.vendor || p.role || '—';
+        const role = p.role && p.role !== label ? ` · ${p.role}` : '';
+        const status = peerStatusLabel(p);
+        const fixed = p.fixed_size || (p.packet_size_min > 0 && p.packet_size_min === p.packet_size_max && typeof identical === 'number' && identical >= 6);
+        if (p.restricted || p.shielded) tr.className = 'restricted-row';
+        else if (peerIsVpsProbe(p)) tr.className = 'vps-row';
+        else if (p.role === 'p2p-mesh' || p.role === 'p2p-unconfirmed') tr.className = 'muted-row';
+        else if (fixed || p.suspicious || (typeof identical === 'number' && identical >= 6)) tr.className = 'warn-row';
+        const checked = selectedPeerIps.has(ip) ? ' checked' : '';
+        tr.innerHTML =
+          `<td><input type="checkbox" class="peerPick" data-ip="${ip}"${checked}></td>` +
+          `<td>${ip || '—'}</td>` +
+          `<td>${label}${role}</td>` +
+          `<td>${identical}</td>` +
+          `<td>${size}</td>` +
+          `<td>${spread}</td>` +
+          `<td>${p.total_packets ?? p.packets ?? '—'}</td>` +
+          `<td>${p.tiny_packets ?? '—'}</td>` +
+          `<td>${p.poll_hits ?? '—'}</td>` +
+          `<td class="status-cell">${status}</td>`;
+        bodyEl.appendChild(tr);
+      });
+      updatePeerSelectCount();
+    }
+
+    async function parseActionResponse(r) {
+      const text = await r.text();
+      if (!text) {
+        if (!r.ok) throw new Error('HTTP ' + r.status + ' (empty response)');
+        return { ok: true, message: 'Done' };
+      }
+      try {
+        return JSON.parse(text);
+      } catch (_) {
+        throw new Error('HTTP ' + r.status + ' — not JSON');
+      }
+    }
+
+    async function action(url, body, attempt = 0) {
       if (busy) return;
       busy = true;
       document.querySelectorAll('button').forEach(b => b.disabled = true);
+      if (url.includes('/session/match')) toast('Starting in-match…');
       try {
-        const opts = body != null
-          ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-          : { method: 'POST' };
-        const r = await fetch(url, opts);
-        const j = await r.json();
-        toast(j.message || j.ok ? 'Done' : 'Failed');
+        const payload = body != null ? body : {};
+        const r = await fetchTimed(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify(payload),
+        }, 15000);
+        const j = await parseActionResponse(r);
+        if (!r.ok || j.ok === false) {
+          const msg = j.message || j.error || ('HTTP ' + r.status);
+          throw new Error(msg);
+        }
+        toast(j.message || 'Done');
         await refresh();
       } catch (e) {
-        toast('Request failed');
+        if (attempt < 1 && url.includes('/session/match')) {
+          busy = false;
+          document.querySelectorAll('button').forEach(b => b.disabled = false);
+          await new Promise(res => setTimeout(res, 600));
+          return action(url, body, attempt + 1);
+        }
+        const msg = e && e.message ? e.message : 'Request failed';
+        toast(e.name === 'AbortError' ? 'Request timed out — retrying…' : msg);
+        console.error('dashboard action failed', url, e);
       } finally {
         busy = false;
         document.querySelectorAll('button').forEach(b => b.disabled = false);
@@ -624,6 +1190,55 @@
 
       const sc = d.scorer || {};
       const tel = d.telemetry || {};
+      const ng = sess.network_guard || d.network_guard || {};
+      const xboxTel = tel.xbox || {};
+      $('xboxPath').textContent = xboxTel.pathLabel || ng.path?.label || 'Wired · MoCA';
+
+      const xboxIp = xboxTel.ip || ng.xbox_ip || '192.168.167.65';
+      let xboxLan = xboxTel.lanLatencyMs;
+      if (xboxLan == null && Array.isArray(tel.connections?.items)) {
+        const hit = tel.connections.items.find(c => c.ip === xboxIp);
+        xboxLan = hit && hit.latencyMs;
+      }
+      $('xboxLanLat').textContent = ms(xboxLan);
+      $('xboxLanLat').className = xboxLan != null && xboxLan <= 8 ? 'good' : (xboxLan != null && xboxLan > 15 ? 'bad' : '');
+
+      const moca = ng.moca_qos || {};
+      const inLobby = phase === 'matchmaking' || phase === 'in-match';
+      const mocaText = moca.active
+        ? `EF active — game ports prioritized on MoCA`
+        : inLobby
+          ? 'Waiting — applies on next poll'
+          : 'Off — enables in lobby/match';
+      $('mocaQos').textContent = mocaText;
+      $('mocaQos').className = moca.active ? 'good' : (inLobby ? 'warn-text' : '');
+      $('mocaQosDefense').textContent = moca.active ? `EF · ${moca.dscp || 'ef'}` : (inLobby ? 'Pending' : 'Off');
+      $('mocaQosDefense').className = moca.active ? 'good' : '';
+
+      const ps = ng.packet_shield || {};
+      $('inMatchShield').textContent = ps.in_match_mode
+        ? 'In-match — Warzone + Xbox Live only'
+        : ps.console_mode
+          ? 'Console allowlist'
+          : ps.active
+            ? 'Shield active'
+            : 'Off';
+      $('inMatchShield').className = (ps.in_match_mode || ps.console_mode) ? 'good' : '';
+
+      const ua = ng.upload_assist || {};
+      const uaText = ua.active
+        ? `Boost · ${ua.egress_mbps || '?'} / ${ua.shaped_mbps || '?'} Mbps (${ua.utilization_pct || 0}%)`
+        : inLobby
+          ? 'Pending — applies on next poll'
+          : 'Off';
+      $('uploadAssist').textContent = uaText;
+      $('uploadAssist').className = ua.active ? 'good' : (inLobby ? 'warn-text' : '');
+      const upAlerts = ua.alerts || [];
+      $('uploadPressure').textContent = ua.pressure
+        ? (upAlerts[0] || 'High upload utilization')
+        : (ua.utilization_pct != null ? `${ua.utilization_pct}% of shaped upload` : '—');
+      $('uploadPressure').className = ua.pressure ? 'bad' : '';
+
       const wan = sc.wan_latency_ms ?? tel.wan?.latencyMs;
       $('wanLat').textContent = ms(wan);
       $('wanJit').textContent = ms(sc.wan_jitter_ms);
@@ -647,17 +1262,18 @@
       list($('anomalies'), sess.anomalies);
       list($('reasons'), cl.reasons, 'No cheater signals');
 
-      const ng = sess.network_guard || d.network_guard || {};
       $('guardMode').textContent = ng.mode || '—';
       $('guardEngage').textContent = ng.engage ? 'Desync yes' : 'Desync no';
       const fg = ng.flood_guard || {};
       $('floodGuard').textContent = fg.active
         ? (fg.level === 'shield'
-          ? ((ng.packet_shield && ng.packet_shield.peer_attack)
+          ? (ps.in_match_mode
+            ? 'IN-MATCH — Warzone + Xbox Live only'
+            : ((ng.packet_shield && ng.packet_shield.peer_attack)
             ? 'SHIELD — peer probe drop (VPS/tiny floods)'
             : (ng.packet_shield && ng.packet_shield.non_game_drop)
               ? 'SHIELD — strict (non-game ports dropped)'
-              : 'SHIELD — tiny packets (≤79B) dropped')
+              : 'SHIELD — console allowlist'))
           : fg.level === 'harden'
           ? 'HARDEN — kick/flood mitigation'
           : 'DEFEND — per-source limits')
@@ -680,6 +1296,17 @@
       if (prof.good_samples != null || prof.bad_samples != null) {
         $('learnProfiles').textContent =
           `Good ${prof.good_samples ?? 0} · Bad ${prof.bad_samples ?? 0} · Marginal ${prof.marginal_samples ?? 0} · Feedback +${prof.good_feedback ?? 0}/-${prof.bad_feedback ?? 0}`;
+      }
+      const gs = sess.game_state || d.game_state || {};
+      const rep = sess.lobby_reputation || d.lobby_reputation || {};
+      if (gs.playlist || rep.gate != null) {
+        const gsLine = [
+          gs.playlist ? `Playlist: ${gs.playlist}` : null,
+          gs.recent_kick ? 'Recent kick (game event)' : null,
+          rep.gate ? 'Lobby reputation gate — pre-shield active' : null,
+          d.learning?.federated_folds ? `Federated folds: ${d.learning.federated_folds}` : null,
+        ].filter(Boolean).join(' · ');
+        if (gsLine) $('learnProfiles').textContent += ' · ' + gsLine;
       }
       list($('patterns'), d.learning?.patterns);
 
@@ -709,6 +1336,7 @@
 
       const pkt = (sess.packet_analysis || d.packet_analysis || {});
       const pktMetrics = pkt.metrics || {};
+      renderIdenticalPeersPanel(d.peer_tracker);
       const pktVerdict = pkt.verdict || '—';
       $('packetSummary').textContent = pktVerdict === 'normal_packets'
         ? 'Captured packets look normal for Warzone.'
@@ -717,7 +1345,7 @@
           : pktVerdict === 'likely_cheat_packets'
             ? 'Packet capture strongly matches cheat-lobby behavior.'
             : pktVerdict === 'no_capture'
-              ? 'Packet capture unavailable — Firewalla tcpdump may be skipped under memory pressure.'
+              ? ((pkt.alerts && pkt.alerts[0]) || 'Packet capture waiting — Xbox offline, idle, or array-firewall memory pressure.')
               : (pkt.alerts && pkt.alerts[0]) || 'Waiting for packet capture…';
       const pv = $('packetVerdict');
       pv.textContent = pktVerdict.replace(/_/g, ' ');
@@ -732,6 +1360,9 @@
       $('pktPeerTiny').textContent = pktMetrics.peer_tiny_inbound != null ? pktMetrics.peer_tiny_inbound : '—';
       const peers = pktMetrics.suspicious_peers || [];
       $('pktPeerCount').textContent = Array.isArray(peers) ? peers.length : 0;
+
+      const identicalPeers = pktMetrics.inbound_identical_peers || [];
+
       if (Array.isArray(peers) && peers.length) {
         list($('suspiciousPeers'), peers.map(p => {
           const label = p.label || p.vendor || 'game-peer';
@@ -746,6 +1377,18 @@
         list($('suspiciousPeers'), [], 'No suspicious peers flagged');
       }
       list($('packetAlerts'), pkt.alerts, 'No packet-level cheat signals');
+
+      const ifc = sess.information_flow || {};
+      $('ifcFlowBits').textContent = ifc.flow_bits != null ? Number(ifc.flow_bits).toFixed(2) + ' bits' : '—';
+      $('ifcTotalFlow').textContent = ifc.total_flow_bits != null ? Number(ifc.total_flow_bits).toFixed(1) + ' bits' : '—';
+      $('ifcSteps').textContent = ifc.steps != null ? ifc.steps : '—';
+      $('ifcByteFlow').textContent = ifc.byte_flow_bits != null ? Number(ifc.byte_flow_bits).toFixed(2) + ' bits' : '—';
+      $('ifcSuperlinear').textContent = ifc.superlinear_flow ? 'YES' : 'no';
+      $('ifcSuperlinear').className = ifc.superlinear_flow ? 'bad' : '';
+      $('ifcPrg').textContent = ifc.prg_like ? 'YES' : 'no';
+      $('ifcPrg').className = ifc.prg_like ? 'warn' : '';
+      list($('ifcAlerts'), ifc.alerts, 'No information-flow anomalies');
+
       const pbody = $('packetBody');
       pbody.innerHTML = '';
       const pktRecs = (d.telemetry?.packetCapture?.records || []);
@@ -785,7 +1428,7 @@
           lat: c.latencyMs ?? prev.lat,
         });
       });
-      [...hosts.entries()].slice(0, 16).forEach(([h, info]) => {
+      [...hosts.entries()].slice(0, 48).forEach(([h, info]) => {
         const tr = document.createElement('tr');
         tr.innerHTML = '<td>' + h + '</td><td>' + info.role + '</td><td>' + ms(info.lat) + '</td>';
         tbody.appendChild(tr);
@@ -801,8 +1444,10 @@
     }
 
     async function refresh() {
+      if (refreshInFlight) return;
+      refreshInFlight = true;
       try {
-        const r = await fetch('/v1/dashboard/data');
+        const r = await fetchTimed('/v1/dashboard/data', {}, 8000);
         if (!r.ok) throw new Error('HTTP ' + r.status);
         try {
           render(await r.json());
@@ -811,11 +1456,66 @@
           console.error('dashboard render failed', e);
         }
       } catch (e) {
-        $('pollMeta').textContent = 'Offline — retrying…';
+        $('pollMeta').textContent = e.name === 'AbortError'
+          ? 'Slow response — retrying…'
+          : 'Offline — retrying…';
         console.error('dashboard refresh failed', e);
+      } finally {
+        refreshInFlight = false;
       }
     }
 
+    async function peerAction(url) {
+      const ips = selectedPeerList();
+      if (!ips.length) {
+        toast('Select at least one IP');
+        return;
+      }
+      await action(url, { ips });
+    }
+
+    $('identicalPeersOverview').addEventListener('change', (ev) => {
+      const t = ev.target;
+      if (!t.classList || !t.classList.contains('peerPick')) return;
+      const ip = t.dataset.ip;
+      if (!ip) return;
+      if (t.checked) selectedPeerIps.add(ip);
+      else selectedPeerIps.delete(ip);
+      updatePeerSelectCount();
+    });
+
+    $('peerSelectAll').addEventListener('change', (ev) => {
+      const on = ev.target.checked;
+      document.querySelectorAll('.peerPick').forEach(box => {
+        box.checked = on;
+        const ip = box.dataset.ip;
+        if (!ip) return;
+        if (on) selectedPeerIps.add(ip);
+        else selectedPeerIps.delete(ip);
+      });
+      updatePeerSelectCount();
+    });
+
+    $('btnShieldPeers').onclick = () => peerAction('/v1/peers/shield');
+    $('btnRestrictPeers').onclick = () => peerAction('/v1/peers/restrict');
+    $('btnUnrestrictPeers').onclick = () => peerAction('/v1/peers/unrestrict');
+    $('btnSelectVps').onclick = () => {
+      selectedPeerIps.clear();
+      document.querySelectorAll('.peerPick').forEach(box => {
+        const ip = box.dataset.ip;
+        if (!ip) return;
+        const row = (window.__peerRows || []).find(p => p.ip === ip);
+        if (row && peerIsVpsProbe(row)) {
+          box.checked = true;
+          selectedPeerIps.add(ip);
+        } else {
+          box.checked = false;
+        }
+      });
+      updatePeerSelectCount();
+      if (!selectedPeerIps.size) toast('No VPS · game-peer rows in table');
+    };
+    $('btnClearPeers').onclick = () => action('/v1/peers/clear');
     $('btnInMatch').onclick = () => action('/v1/session/match');
     $('btnBad').onclick = () => action('/v1/feedback', { bad_lobby: true, note: 'dashboard' });
     $('btnKicked').onclick = () => action('/v1/feedback/kicked');
@@ -823,6 +1523,54 @@
     $('btnClean').onclick = () => action('/v1/feedback', { bad_lobby: false, note: 'dashboard clean' });
     $('btnLeft').onclick = () => action('/v1/session/end');
     $('btnDeepCapture').onclick = () => action('/v1/packets/capture');
+
+    $('connDbBody').addEventListener('change', (ev) => {
+      const t = ev.target;
+      if (!t.classList || !t.classList.contains('connPick')) return;
+      const ip = t.dataset.ip;
+      if (!ip) return;
+      if (t.checked) selectedConnIps.add(ip);
+      else selectedConnIps.delete(ip);
+      updateConnSelectCount();
+    });
+    $('connSelectAll').addEventListener('change', (ev) => {
+      const on = ev.target.checked;
+      document.querySelectorAll('.connPick').forEach(box => {
+        box.checked = on;
+        const ip = box.dataset.ip;
+        if (!ip) return;
+        if (on) selectedConnIps.add(ip);
+        else selectedConnIps.delete(ip);
+      });
+      updateConnSelectCount();
+    });
+    $('btnConnRefresh').onclick = () => loadConnectionsDb({ reloadSessions: true, reloadOffenders: true });
+    $('connFilterSession').onchange = () => { resetConnDbPage(); loadConnectionsDb({ reloadSessions: true }); };
+    $('connFilterType').onchange = () => { resetConnDbPage(); loadConnectionsDb(); };
+    $('connFilterPolicy').onchange = () => { resetConnDbPage(); loadConnectionsDb(); };
+    $('connFilterOffenders').onchange = () => { resetConnDbPage(); loadConnectionsDb(); };
+    $('connFilterIp').onchange = () => { resetConnDbPage(); loadConnectionsDb(); };
+    $('connPageSize').onchange = () => { resetConnDbPage(); loadConnectionsDb(); };
+    $('btnConnPrev').onclick = () => {
+      if (connDbPage > 0) {
+        connDbPage -= 1;
+        loadConnectionsDb();
+      }
+    };
+    $('btnConnNext').onclick = () => {
+      if ((connDbPage + 1) * connDbPageSize < connDbTotal) {
+        connDbPage += 1;
+        loadConnectionsDb();
+      }
+    };
+    $('btnConnProtect').onclick = () => connDbAction('protect');
+    $('btnConnBlock').onclick = () => connDbAction('block');
+    $('btnConnNoProtect').onclick = () => connDbAction('none');
+    $('btnConnRemove').onclick = () => connDbAction('remove');
+    $('btnConnInvestigate').onclick = async () => {
+      await actionPost('/v1/investigate/run', { limit: 30 });
+      await loadConnectionsDb();
+    };
 
     document.querySelectorAll('[data-traffic-dir]').forEach(el => {
       el.onclick = () => loadTraffic(el.dataset.trafficDir);

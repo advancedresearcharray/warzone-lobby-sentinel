@@ -1,6 +1,8 @@
+use crate::game_state::store as game_store;
 use crate::ai_advisor::{analyze, AiContext};
 use crate::cheater_lobby::{assess, CheaterVerdict};
 use crate::enrich::classify_value;
+use crate::information_flow::{packet_byte_fingerprint, state_from_snapshot, InformationFlowTracker};
 use crate::learning::engine;
 use crate::packets::analyze_packets;
 use crate::traffic::analyze_inbound;
@@ -21,6 +23,9 @@ pub struct SessionRisk {
     pub ai: Value,
     pub inbound: Value,
     pub packets: Value,
+    pub information_flow: Value,
+    pub lobby_reputation: Value,
+    pub game_state: Value,
 }
 
 impl SessionRisk {
@@ -44,7 +49,26 @@ impl SessionRisk {
             "ai": self.ai,
             "inbound_analysis": self.inbound,
             "packet_analysis": self.packets,
+            "information_flow": self.information_flow,
+            "lobby_reputation": self.lobby_reputation,
+            "game_state": self.game_state,
+            "playlist": game_store().playlist(),
         })
+    }
+
+    pub fn with_reputation(mut self, reputation: Value, offender_ips: &[String]) -> Self {
+        self.lobby_reputation = reputation;
+        if !offender_ips.is_empty() {
+            if let Some(obj) = self.lobby_reputation.as_object_mut() {
+                obj.insert("offender_ips".into(), json!(offender_ips.len()));
+                obj.insert(
+                    "gate".into(),
+                    json!(obj.get("gate").and_then(|v| v.as_bool()).unwrap_or(false)
+                        || offender_ips.len() >= 3),
+                );
+            }
+        }
+        self
     }
 }
 
@@ -71,6 +95,8 @@ pub struct NetworkSessionScorer {
     conn_decline_polls: u8,
     manual_in_match: bool,
     score_history: Vec<f64>,
+    flow_tracker: InformationFlowTracker,
+    last_kick_handled_at: f64,
 }
 
 impl Default for NetworkSessionScorer {
@@ -92,6 +118,8 @@ impl Default for NetworkSessionScorer {
             conn_decline_polls: 0,
             manual_in_match: false,
             score_history: Vec::new(),
+            flow_tracker: InformationFlowTracker::default(),
+            last_kick_handled_at: 0.0,
         }
     }
 }
@@ -131,6 +159,17 @@ impl NetworkSessionScorer {
             .to_string();
 
         self.track(snapshot);
+
+        let playlist = game_store().playlist();
+        if game_store().recent_kick(120.0) {
+            if let Some(age) = game_store().kick_age_sec() {
+                let kick_ts = now_secs() - age;
+                if self.last_kick_handled_at < kick_ts {
+                    engine().record_kick_event("game-state kick event (Overwolf/Xbox)");
+                    self.last_kick_handled_at = kick_ts;
+                }
+            }
+        }
 
         let roles = role_counts(snapshot);
         let conns = snapshot
@@ -186,6 +225,9 @@ impl NetworkSessionScorer {
                 ai: json!({"summary": "Not in Warzone — AI idle"}),
                 inbound: json!({}),
                 packets: json!({}),
+                information_flow: json!({}),
+                lobby_reputation: json!({}),
+                game_state: game_store().to_json(),
             };
         }
 
@@ -196,7 +238,7 @@ impl NetworkSessionScorer {
                 reasons: vec![],
                 mm_delta: None,
             };
-            engine().record_poll(snapshot, &phase, &clean, None, None);
+            engine().record_poll(snapshot, &phase, &clean, None, None, &playlist);
             let rec = if phase == "post-match" {
                 "Left lobby — monitoring for next queue.".into()
             } else {
@@ -215,12 +257,16 @@ impl NetworkSessionScorer {
                 ai: json!({"summary": "Out of lobby — session logged for learning"}),
                 inbound: json!({}),
                 packets: json!({}),
+                information_flow: json!({}),
+                lobby_reputation: json!({}),
+                game_state: game_store().to_json(),
             };
         }
 
         if phase == "matchmaking" {
             if roles.get("matchmaking").copied().unwrap_or(0)
                 + roles.get("warzone-game").copied().unwrap_or(0)
+                + roles.get("dedicated-server").copied().unwrap_or(0)
                 >= 2
                 && conns >= 8
             {
@@ -235,8 +281,9 @@ impl NetworkSessionScorer {
         if phase == "in-match" {
             let telemetry = roles.get("telemetry").copied().unwrap_or(0);
             let gameplay = roles.get("warzone-game").copied().unwrap_or(0)
+                + roles.get("dedicated-server").copied().unwrap_or(0)
                 + roles.get("game-assets").copied().unwrap_or(0);
-            if telemetry >= 3 && gameplay >= 2 && telemetry >= roles.get("warzone-game").copied().unwrap_or(0) {
+            if telemetry >= 3 && gameplay >= 2 && telemetry >= roles.get("warzone-game").copied().unwrap_or(0) + roles.get("dedicated-server").copied().unwrap_or(0) {
                 signals.push((
                     "telemetry_noise".into(),
                     (telemetry as f64 / gameplay.max(1) as f64).min(1.0),
@@ -291,10 +338,37 @@ impl NetworkSessionScorer {
         }
 
         let eng = engine();
-        let th = eng.thresholds();
+        let th = eng.thresholds_for_playlist(&playlist);
         let baseline = eng.inbound_baseline();
         let inbound = analyze_inbound(snapshot, &phase, baseline.as_ref(), &th);
         let packets = analyze_packets(snapshot, &phase, conns);
+
+        let net_state = state_from_snapshot(snapshot, conns, &phase);
+        let pkt_bytes = packet_byte_fingerprint(snapshot);
+        let flow_step = self.flow_tracker.step(&net_state, &pkt_bytes);
+        let flow_json = self.flow_tracker.to_json(&flow_step);
+
+        if flow_step.superlinear {
+            signals.push(("superlinear_flow".into(), (flow_step.flow_bits / 8.0).min(1.0)));
+            anomalies.push(format!(
+                "Information flow spike: {:.2} bits/step (IFC Zenodo 17373031)",
+                flow_step.flow_bits
+            ));
+        } else if flow_step.flow_bits >= 4.0 {
+            signals.push(("info_flow_spike".into(), (flow_step.flow_bits / 8.0).min(1.0)));
+        }
+        if flow_step.prg_like {
+            signals.push(("prg_like_traffic".into(), 0.72));
+            anomalies.push("PRG-like uniform packet bytes — synthetic traffic proxy".into());
+        }
+        if flow_step.byte_flow >= 6.5 && (phase == "matchmaking" || phase == "in-match") {
+            signals.push(("byte_flow_entropy".into(), (flow_step.byte_flow / 8.0).min(1.0)));
+        }
+        for a in &flow_step.alerts {
+            if !anomalies.iter().any(|x| x == a) {
+                anomalies.push(a.clone());
+            }
+        }
 
         for (k, v) in &inbound.signals {
             signals.push((k.clone(), *v));
@@ -339,6 +413,10 @@ impl NetworkSessionScorer {
             ("suspicious_peer", 14.0),
             ("unknown_inbound_packets", 12.0),
             ("packet_cheat", 12.0),
+            ("info_flow_spike", 13.0),
+            ("superlinear_flow", 15.0),
+            ("prg_like_traffic", 14.0),
+            ("byte_flow_entropy", 12.0),
             ("suboptimal_matchmaking_path", 14.0),
         ]
         .into_iter()
@@ -378,7 +456,7 @@ impl NetworkSessionScorer {
         };
 
         let (mut adjusted, learn_notes) =
-            eng.adjust_score(base.confidence / 100.0, conns, &phase, base.mm_delta);
+            eng.adjust_score(base.confidence / 100.0, conns, &phase, base.mm_delta, &playlist);
 
         // In-match: fold session signals into score (telemetry noise, conn fan-out, inbound).
         if phase == "in-match" {
@@ -397,6 +475,12 @@ impl NetworkSessionScorer {
                 }
                 if (k == "peer_tiny_flood" || k == "suspicious_peer") && *v >= 0.35 {
                     adjusted = adjusted.max(0.40);
+                }
+                if (k == "superlinear_flow" || k == "prg_like_traffic") && *v >= 0.35 {
+                    adjusted = adjusted.max(0.42);
+                }
+                if k == "info_flow_spike" && *v >= 0.45 {
+                    adjusted = adjusted.max(0.36);
                 }
             }
             if conns >= 80 {
@@ -425,9 +509,17 @@ impl NetworkSessionScorer {
             Some(&packets),
         );
 
-        eng.record_poll(snapshot, &phase, &verdict, base.mm_delta, server_jitter);
+        eng.record_poll(snapshot, &phase, &verdict, base.mm_delta, server_jitter, &playlist);
         let learning_info = eng.insights();
         let cheater = verdict.to_json();
+        let lobby_reputation = eng.lobby_reputation(
+            snapshot,
+            conns,
+            &phase,
+            base.mm_delta,
+            &playlist,
+            &[],
+        );
 
         let level;
         if phase == "matchmaking" || phase == "in-match" {
@@ -529,6 +621,9 @@ impl NetworkSessionScorer {
             ai,
             inbound: inbound.to_json(),
             packets: packets.to_json(),
+            information_flow: flow_json,
+            lobby_reputation,
+            game_state: game_store().to_json(),
         }
     }
 
@@ -632,6 +727,7 @@ impl NetworkSessionScorer {
         self.conn_decline_polls = 0;
         self.low_activity_polls = 0;
         self.last_phase = "post-match".into();
+        self.last_kick_handled_at = 0.0;
     }
 
     pub fn mark_in_match(&mut self) {
@@ -686,6 +782,23 @@ impl NetworkSessionScorer {
 
         if phase != "in-match" && phase != "matchmaking" {
             return phase.into();
+        }
+
+        // Home screen / dashboard idle — Xbox Live alone is not matchmaking.
+        if phase == "matchmaking" {
+            let warzone_game = roles.get("warzone-game").copied().unwrap_or(0);
+            let matchmaking = roles.get("matchmaking").copied().unwrap_or(0);
+            let assets = roles.get("game-assets").copied().unwrap_or(0);
+            let telemetry = roles.get("telemetry").copied().unwrap_or(0);
+            let qos = roles.get("azure-qos").copied().unwrap_or(0);
+            if warzone_game == 0
+                && matchmaking == 0
+                && assets == 0
+                && telemetry < 2
+                && qos < 2
+            {
+                return "background".into();
+            }
         }
 
         let warzone_game = roles.get("warzone-game").copied().unwrap_or(0);

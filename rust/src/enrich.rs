@@ -2,10 +2,12 @@ use parking_lot::Mutex;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::OnceLock;
 
 static ROLES: OnceLock<Vec<RoleRule>> = OnceLock::new();
 static PTR_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static PTR_BUDGET: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone)]
 struct RoleRule {
@@ -149,6 +151,10 @@ fn reverse_ptr(ip: &str) -> String {
             return hit.clone();
         }
     }
+    if PTR_BUDGET.load(Ordering::Relaxed) == 0 {
+        return String::new();
+    }
+    PTR_BUDGET.fetch_sub(1, Ordering::Relaxed);
     let ptr = Command::new("dig")
         .args(["+short", "+time=1", "+tries=1", "-x", ip, "@1.1.1.1"])
         .output()
@@ -219,18 +225,68 @@ fn parse_port_from(item: &Value, remote: &str) -> Option<u16> {
     None
 }
 
-fn classify_peer_fallback(ip: &str, port: Option<u16>, proto: &str) -> Option<String> {
+fn classify_udp_game_role(ip: &str, port: Option<u16>, proto: &str) -> Option<String> {
     if ip.is_empty() || is_private_ip(ip) {
         return None;
     }
-    if proto.eq_ignore_ascii_case("udp") {
-        match port {
-            Some(3074 | 3075 | 3544) => return Some("game-peer".into()),
-            Some(p) if p >= 1024 => return Some("game-peer".into()),
-            _ => {}
+    if !proto.eq_ignore_ascii_case("udp") {
+        return None;
+    }
+    match port {
+        Some(3074 | 3075) => Some("dedicated-server".into()),
+        Some(p) if p >= 1024 => Some("p2p-mesh".into()),
+        _ => None,
+    }
+}
+
+fn classify_peer_fallback(ip: &str, port: Option<u16>, proto: &str) -> Option<String> {
+    classify_udp_game_role(ip, port, proto)
+}
+
+/// Inbound UDP on CoD game ports — used to detect mesh/server-shaped traffic.
+pub fn is_inbound_player_peer_port(port: Option<u16>, proto: &str) -> bool {
+    if !proto.eq_ignore_ascii_case("udp") {
+        return false;
+    }
+    match port {
+        Some(3074 | 3075) => true,
+        Some(p) if p >= 1024 => true,
+        _ => false,
+    }
+}
+
+/// Classify inbound traffic — P2P-shaped ports stay unconfirmed until VPS identity or probe proof.
+pub fn classify_inbound_endpoint(
+    remote: &str,
+    hostname_hint: &str,
+    port: Option<u16>,
+    proto: &str,
+) -> String {
+    let ip = extract_ip(remote);
+    if !ip.is_empty() {
+        if let Some(role) = classify_local_ip(&ip) {
+            return role;
+        }
+        if let Some(role) = classify_cidr(&ip) {
+            return role;
         }
     }
-    None
+
+    let hint = hostname_hint.trim();
+    if !hint.is_empty() && !is_ipish(hint) {
+        let role = classify_host(hint);
+        if role != "unknown" && role != "vps-probe-host" {
+            return role;
+        }
+    }
+
+    if is_inbound_player_peer_port(port, proto) {
+        if let Some(role) = classify_udp_game_role(&ip, port, proto) {
+            return role;
+        }
+    }
+
+    classify_endpoint_with_port(remote, hostname_hint, port, proto)
 }
 
 pub fn classify_endpoint(remote: &str, hostname_hint: &str) -> String {
@@ -258,16 +314,6 @@ pub fn classify_endpoint_with_port(
         let role = classify_host(hint);
         if role != "unknown" {
             return role;
-        }
-    }
-
-    if !ip.is_empty() {
-        let ptr = reverse_ptr(&ip);
-        if !ptr.is_empty() && ptr != ip {
-            let role = classify_host(&ptr);
-            if role != "unknown" {
-                return role;
-            }
         }
     }
 
@@ -377,6 +423,8 @@ pub fn enrich_snapshot(mut snapshot: Value) -> Value {
         return snapshot;
     }
 
+    PTR_BUDGET.store(6, Ordering::Relaxed);
+
     let mut role_counts: HashMap<String, u32> = HashMap::new();
     let mut classified = Vec::new();
     for host in flow_hosts(&snapshot) {
@@ -402,11 +450,11 @@ pub fn enrich_snapshot(mut snapshot: Value) -> Value {
 
     let mut game = "unknown".to_string();
     if role_counts.contains_key("warzone-game")
+        || role_counts.contains_key("dedicated-server")
         || role_counts.contains_key("game-assets")
         || role_counts.contains_key("telemetry")
+        || role_counts.contains_key("matchmaking")
     {
-        game = "warzone".into();
-    } else if role_counts.contains_key("xbox-live") && xbox_online {
         game = "warzone".into();
     }
 
@@ -432,13 +480,24 @@ fn infer_phase(
     conns: u32,
     game: &str,
 ) -> &'static str {
-    if roles.get("warzone-game").copied().unwrap_or(0) >= 1 {
+    if roles.get("warzone-game").copied().unwrap_or(0) >= 1
+        || roles.get("dedicated-server").copied().unwrap_or(0) >= 1
+    {
         return "in-match";
     }
     if roles.get("matchmaking").copied().unwrap_or(0) >= 1 {
         return "matchmaking";
     }
-    if roles.get("azure-qos").copied().unwrap_or(0) >= 2 && conns >= 80 {
+    if xbox_online
+        && game == "warzone"
+        && conns >= 22
+        && (roles.get("game-assets").copied().unwrap_or(0) >= 1
+            || roles.get("matchmaking").copied().unwrap_or(0) >= 1
+            || roles.get("telemetry").copied().unwrap_or(0) >= 2)
+    {
+        return "matchmaking";
+    }
+    if roles.get("azure-qos").copied().unwrap_or(0) >= 2 && conns >= 45 {
         return "matchmaking";
     }
     if game == "warzone"
@@ -450,9 +509,9 @@ fn infer_phase(
         return "in-match";
     }
     if xbox_online
-        && conns >= 40
+        && conns >= 25
         && (roles.get("matchmaking").copied().unwrap_or(0) > 0
-            || roles.get("azure-qos").copied().unwrap_or(0) >= 2)
+            || roles.get("azure-qos").copied().unwrap_or(0) >= 1)
     {
         return "matchmaking";
     }
@@ -468,13 +527,15 @@ fn infer_phase(
 pub fn role_index(role: &str) -> u8 {
     match role {
         "warzone-game" => 1,
-        "matchmaking" => 2,
-        "game-assets" => 3,
-        "telemetry" => 4,
-        "xbox-live" => 5,
-        "azure-qos" => 6,
-        "notifications" => 7,
-        "game-peer" => 8,
+        "dedicated-server" => 2,
+        "matchmaking" => 3,
+        "game-assets" => 4,
+        "telemetry" => 5,
+        "xbox-live" => 6,
+        "azure-qos" => 7,
+        "notifications" => 8,
+        "vps-probe" | "game-peer" => 9,
+        "p2p-mesh" | "p2p-unconfirmed" => 10,
         _ => 0,
     }
 }
@@ -491,13 +552,143 @@ pub fn phase_code(phase: &str) -> u8 {
 }
 
 pub fn is_game_peer(role: &str) -> bool {
-    role == "game-peer"
+    is_vps_probe_role(role)
+}
+
+pub fn is_p2p_unconfirmed(role: &str) -> bool {
+    is_p2p_mesh_role(role)
+}
+
+pub fn is_vps_probe_role(role: &str) -> bool {
+    matches!(role, "vps-probe" | "game-peer")
+}
+
+pub fn is_p2p_mesh_role(role: &str) -> bool {
+    matches!(role, "p2p-mesh" | "p2p-unconfirmed")
+}
+
+/// VPS provider identity hint — does not confirm probe traffic by itself.
+pub fn is_vps_provider_host(ip: &str, hostname_hint: &str) -> bool {
+    if ip.is_empty() {
+        return false;
+    }
+    if is_vultr_ip(ip) {
+        return true;
+    }
+    let hint = hostname_hint.to_lowercase();
+    if hint.contains("vultr")
+        || hint.contains("choopa")
+        || hint.contains("linode")
+        || hint.contains("digitalocean")
+        || hint.contains("your-server")
+    {
+        return true;
+    }
+    if !hostname_hint.is_empty() && classify_host(hostname_hint) == "vps-probe-host" {
+        return true;
+    }
+    false
+}
+
+/// Legacy name — probe proof required before treating as hostile peer.
+pub fn is_confirmed_player_peer_host(ip: &str, hostname_hint: &str) -> bool {
+    is_vps_provider_host(ip, hostname_hint)
+}
+
+/// Promote to player peer only after repeated probe-shaped traffic (not port alone).
+pub fn confirm_player_peer_from_probe_signals(
+    identical_count: u32,
+    tiny_packets: u64,
+    total_packets: u64,
+    packet_size_min: u64,
+    packet_size_max: u64,
+) -> bool {
+    let fixed = packet_size_min > 0
+        && packet_size_min == packet_size_max
+        && identical_count >= 6;
+    fixed || identical_count >= 6 || (tiny_packets >= 3 && total_packets >= 6)
+}
+
+pub fn resolve_inbound_peer_role(
+    ip: &str,
+    hostname_hint: &str,
+    base_role: &str,
+    identical_count: u32,
+    tiny_packets: u64,
+    total_packets: u64,
+    packet_size_min: u64,
+    packet_size_max: u64,
+) -> String {
+    if is_infrastructure(base_role) {
+        return base_role.into();
+    }
+    let probe = confirm_player_peer_from_probe_signals(
+        identical_count,
+        tiny_packets,
+        total_packets,
+        packet_size_min,
+        packet_size_max,
+    );
+    if probe && is_vps_provider_host(ip, hostname_hint) {
+        return "vps-probe".into();
+    }
+    if base_role == "dedicated-server" {
+        return "dedicated-server".into();
+    }
+    if base_role == "p2p-mesh" || base_role == "p2p-unconfirmed" {
+        return "p2p-mesh".into();
+    }
+    if base_role == "vps-probe" || base_role == "game-peer" {
+        return if probe && is_vps_provider_host(ip, hostname_hint) {
+            "vps-probe".into()
+        } else {
+            "p2p-mesh".into()
+        };
+    }
+    base_role.into()
+}
+
+/// Roles allowed to reach Xbox during in-match shield (Warzone + Xbox Live + LAN).
+pub fn is_in_match_allowed(role: &str) -> bool {
+    matches!(
+        role,
+        "warzone-game" | "dedicated-server" | "xbox-live" | "lan-local" | "lan-gateway"
+    )
+}
+
+pub fn should_drop_inbound_role(role: &str, phase: &str) -> bool {
+    if is_vps_probe_role(role) || is_p2p_mesh_role(role) {
+        return true;
+    }
+    phase == "in-match" && !role.is_empty() && !is_in_match_allowed(role)
+}
+
+pub fn should_drop_inbound(role: &str, port: Option<u16>, proto: &str, phase: &str) -> bool {
+    if is_game_peer(role) || is_p2p_unconfirmed(role) {
+        return true;
+    }
+    if is_inbound_player_peer_port(port, proto) {
+        return true;
+    }
+    should_drop_inbound_role(role, phase)
+}
+
+/// Peer table / identical-packet panel — show unconfirmed P2P, hide infrastructure.
+pub fn should_show_in_peer_table(role: &str, phase: &str) -> bool {
+    if is_infrastructure(role) {
+        return false;
+    }
+    if is_game_peer(role) || is_p2p_unconfirmed(role) {
+        return true;
+    }
+    !should_drop_inbound_role(role, phase)
 }
 
 pub fn is_infrastructure(role: &str) -> bool {
     matches!(
         role,
         "warzone-game"
+            | "dedicated-server"
             | "game-assets"
             | "matchmaking"
             | "xbox-live"
@@ -507,24 +698,70 @@ pub fn is_infrastructure(role: &str) -> bool {
     )
 }
 
+const VULTR_IP_PREFIXES: &[&str] = &[
+    "45.76.", "45.77.", "66.42.", "96.30.", "108.61.", "149.28.", "155.138.", "207.148.", "140.82.",
+    "144.202.",
+];
+
+pub fn is_vultr_ip(ip: &str) -> bool {
+    VULTR_IP_PREFIXES.iter().any(|pfx| ip.starts_with(pfx))
+}
+
+pub fn is_vps_host_label(label: &str) -> bool {
+    matches!(
+        label,
+        "Vultr VPS" | "Linode VPS" | "AWS" | "Google Cloud" | "DigitalOcean"
+    ) || label.ends_with(" VPS") || label.contains("Cloud")
+}
+
+/// VPS kick/probe host with packet proof — auto-block target.
+pub fn is_vps_game_peer(label: &str, role: &str) -> bool {
+    is_vps_probe_role(role) && (is_vps_host_label(label) || label.contains("VPS"))
+}
+
 pub fn peer_display_label(ip: &str, hostname_hint: &str) -> String {
+    inbound_display_label(ip, hostname_hint, "p2p-mesh")
+}
+
+fn peer_vps_label(ip: &str, hostname_hint: &str) -> Option<String> {
     let hint = hostname_hint.to_lowercase();
-    if hint.contains("vultr") {
-        return "Vultr VPS".into();
+    if hint.contains("vultr") || hint.contains("choopa") || is_vultr_ip(ip) {
+        return Some("Vultr VPS".into());
     }
     if hint.contains("linode") {
-        return "Linode VPS".into();
+        return Some("Linode VPS".into());
     }
     if hint.contains("amazonaws") {
-        return "AWS".into();
+        return Some("AWS".into());
+    }
+    if hint.contains("digitalocean") {
+        return Some("DigitalOcean".into());
     }
     if ip.starts_with("34.") || ip.starts_with("35.") {
-        return "Google Cloud".into();
+        return Some("Cloud host".into());
     }
-    if ip.starts_with("66.42.") || ip.starts_with("155.138.") {
-        return "Vultr VPS".into();
+    None
+}
+
+/// Human label for inbound identical-peer rows (infrastructure ≠ player peer).
+pub fn inbound_display_label(ip: &str, hostname_hint: &str, role: &str) -> String {
+    match role {
+        "xbox-live" => return "Xbox Live".into(),
+        "warzone-game" => return "CoD backend".into(),
+        "dedicated-server" => return "Dedicated server".into(),
+        "matchmaking" => return "Matchmaking".into(),
+        "game-assets" => return "Game CDN".into(),
+        "azure-qos" => return "Azure QoS".into(),
+        "telemetry" => return "Telemetry".into(),
+        "notifications" => return "Notifications".into(),
+        "lan-local" | "lan-gateway" => return "LAN".into(),
+        "p2p-mesh" | "p2p-unconfirmed" => return "P2P mesh (unconfirmed)".into(),
+        "vps-probe" | "game-peer" => {
+            return peer_vps_label(ip, hostname_hint).unwrap_or_else(|| "VPS probe".into());
+        }
+        _ => {}
     }
-    "Player peer".into()
+    peer_vps_label(ip, hostname_hint).unwrap_or_else(|| "Unconfirmed inbound".into())
 }
 
 pub fn is_unknown_inbound(role: &str) -> bool {
@@ -535,13 +772,17 @@ pub fn is_known_traffic(role: &str) -> bool {
     matches!(
         role,
         "warzone-game"
+            | "dedicated-server"
             | "game-assets"
             | "matchmaking"
             | "xbox-live"
             | "azure-qos"
             | "telemetry"
             | "notifications"
+            | "vps-probe"
             | "game-peer"
+            | "p2p-mesh"
+            | "p2p-unconfirmed"
             | "lan-local"
             | "lan-gateway"
     )
@@ -567,6 +808,75 @@ mod tests {
     }
 
     #[test]
+    fn azure_on_p2p_port_inbound_stays_xbox_live_not_player() {
+        assert_eq!(
+            classify_inbound_endpoint("20.201.200.56:3074", "", Some(3074), "udp"),
+            "xbox-live"
+        );
+    }
+
+    #[test]
+    fn unknown_on_high_port_is_p2p_mesh_not_player() {
+        assert_eq!(
+            classify_inbound_endpoint("203.0.113.51:44998", "", Some(44998), "udp"),
+            "p2p-mesh"
+        );
+    }
+
+    #[test]
+    fn idle_home_xbox_live_is_background_not_matchmaking() {
+        let mut roles = HashMap::new();
+        roles.insert("xbox-live".into(), 8);
+        assert_eq!(infer_phase(&roles, true, 45, "unknown"), "background");
+    }
+
+    #[test]
+    fn xbox_live_inbound_label_not_player_peer() {
+        assert_eq!(
+            inbound_display_label("20.201.200.49", "", "xbox-live"),
+            "Xbox Live"
+        );
+    }
+
+    #[test]
+    fn demonware_on_p2p_port_stays_warzone_not_player() {
+        assert_eq!(
+            classify_inbound_endpoint("185.34.106.103:3074", "", Some(3074), "udp"),
+            "warzone-game"
+        );
+    }
+
+    #[test]
+    fn vultr_on_high_port_is_p2p_mesh_without_probe_proof() {
+        assert_eq!(
+            classify_inbound_endpoint("66.42.86.93:44998", "", Some(44998), "udp"),
+            "p2p-mesh"
+        );
+    }
+
+    #[test]
+    fn vultr_with_probe_signals_becomes_vps_probe() {
+        assert_eq!(
+            resolve_inbound_peer_role("66.42.86.93", "66.42.86.93.vultrusercontent.com", "p2p-mesh", 8, 0, 10, 64, 64),
+            "vps-probe"
+        );
+    }
+
+    #[test]
+    fn unknown_on_game_port_is_dedicated_server() {
+        assert_eq!(
+            classify_inbound_endpoint("203.0.113.51:3074", "", Some(3074), "udp"),
+            "dedicated-server"
+        );
+    }
+
+    #[test]
+    fn probe_signals_confirm_player_peer() {
+        assert!(confirm_player_peer_from_probe_signals(8, 0, 10, 64, 64));
+        assert!(!confirm_player_peer_from_probe_signals(2, 1, 3, 64, 128));
+    }
+
+    #[test]
     fn akamai_23_66_is_game_assets() {
         assert_eq!(classify_endpoint("23.66.101.238:443", ""), "game-assets");
     }
@@ -582,10 +892,10 @@ mod tests {
     }
 
     #[test]
-    fn vultr_udp_peer() {
+    fn vultr_udp_high_port_is_p2p_mesh() {
         assert_eq!(
             classify_endpoint_with_port("66.42.86.93:44998", "", Some(44998), "udp"),
-            "game-peer"
+            "p2p-mesh"
         );
     }
 }
