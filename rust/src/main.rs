@@ -361,6 +361,7 @@ async fn run_poll_loop(state: Arc<AppState>, interval: f64, idle_interval: f64) 
                             obj.insert("session_hex".into(), json!(hex));
                         }
                         obj.insert("offender_ips".into(), json!(offender_ips.clone()));
+                        obj.insert("peer_tracker".into(), pt.to_json());
                         let label = risk
                             .cheater_lobby
                             .get("label")
