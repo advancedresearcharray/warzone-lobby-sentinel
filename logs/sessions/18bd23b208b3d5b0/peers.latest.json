@@ -1,0 +1,25 @@
+{
+  "peers": [
+    {
+      "first_seen": 1782620388.080948,
+      "fixed_size": false,
+      "identical_count": 102,
+      "identical_size": 0,
+      "ip": "198.18.0.2",
+      "label": "Unconfirmed inbound",
+      "last_seen": 1782620388.080948,
+      "packet_size_max": 0,
+      "packet_size_min": 0,
+      "poll_hits": 1,
+      "remote": "198.18.0.2",
+      "role": "unknown",
+      "suspicious": true,
+      "tiny_packets": 102,
+      "total_packets": 102,
+      "vps_probe": false
+    }
+  ],
+  "phase": "matchmaking",
+  "session_hex": "18bd23b208b3d5b0",
+  "updated_at": 1782620388.0809636
+}

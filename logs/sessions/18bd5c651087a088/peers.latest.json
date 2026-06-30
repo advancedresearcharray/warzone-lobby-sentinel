@@ -1,0 +1,43 @@
+{
+  "peers": [
+    {
+      "first_seen": 1782682616.6474311,
+      "fixed_size": false,
+      "identical_count": 12,
+      "identical_size": 1269,
+      "ip": "198.18.0.2",
+      "label": "Vultr VPS",
+      "last_seen": 1782683070.8585746,
+      "packet_size_max": 1269,
+      "packet_size_min": 49,
+      "poll_hits": 24,
+      "remote": "198.18.0.2",
+      "role": "vps-probe",
+      "suspicious": true,
+      "tiny_packets": 9,
+      "total_packets": 307,
+      "vps_probe": true
+    },
+    {
+      "first_seen": 1782682751.319648,
+      "fixed_size": false,
+      "identical_count": 1,
+      "identical_size": 0,
+      "ip": "192.0.2.10",
+      "label": "LAN",
+      "last_seen": 1782682751.319648,
+      "packet_size_max": 0,
+      "packet_size_min": 0,
+      "poll_hits": 1,
+      "remote": "192.0.2.10",
+      "role": "lan-local",
+      "suspicious": false,
+      "tiny_packets": 1,
+      "total_packets": 1,
+      "vps_probe": false
+    }
+  ],
+  "phase": "ended",
+  "session_hex": "18bd5c651087a088",
+  "updated_at": 1782683126.2358115
+}

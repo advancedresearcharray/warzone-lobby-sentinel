@@ -1,0 +1,26 @@
+{
+  "exported_at": "2026-06-30T03:34:03Z",
+  "source": "co-hosted array-firewall appliance (journalctl + session store)",
+  "journal_window": "14 days",
+  "session_count": 8,
+  "redaction": "scripts/sanitize-logs.py \u2014 LAN/private IPs, MACs, hostnames, CTIDs removed",
+  "files": [
+    "journal-14d.txt",
+    "sessions/18bd23b208b3d5b0/peers.latest.json",
+    "sessions/18bd23b208b3d5b0/session.meta.json",
+    "sessions/18bd379c13956aa6/session.meta.json",
+    "sessions/18bd520301624675/session.meta.json",
+    "sessions/18bd5c2c88d84b3f/session.meta.json",
+    "sessions/18bd5c651087a088/peers.latest.json",
+    "sessions/18bd5c651087a088/session.meta.json",
+    "sessions/18bd5c651087a088/snapshots/final.json",
+    "sessions/18bd5cdcbea6800c/peers.latest.json",
+    "sessions/18bd5cdcbea6800c/session.meta.json",
+    "sessions/18bd5cdcbea6800c/snapshots/final.json",
+    "sessions/18bd5e6e60eeaa45/peers.latest.json",
+    "sessions/18bd5e6e60eeaa45/session.meta.json",
+    "sessions/18bd5e6e60eeaa45/snapshots/final.json",
+    "sessions/18bd6690eb1f0011/peers.latest.json",
+    "sessions/18bd6690eb1f0011/session.meta.json"
+  ]
+}
