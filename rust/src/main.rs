@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::{sleep, timeout, Duration};
 use tracing_subscriber::EnvFilter;
 use warzone_sentinel::{
-    dashboard, enrich::enrich_snapshot, firewalla::FirewallaClient, game_state,
+    ai_advisor, dashboard, enrich::enrich_snapshot, firewalla::FirewallaClient, game_state,
     learning, learning::engine,
     network_guard::guard, network_session::NetworkSessionScorer, notify, packets, peer_tracker,
     session_export,
@@ -355,13 +355,27 @@ async fn run_poll_loop(state: Arc<AppState>, interval: f64, idle_interval: f64) 
                         .get("session_hex")
                         .and_then(|v| v.as_str())
                         .map(str::to_string);
+                    let offender_ips = cached_offender_ips(&state, poll_n).await;
                     if let Some(obj) = risk_json.as_object_mut() {
                         if let Some(hex) = session_hex.clone() {
                             obj.insert("session_hex".into(), json!(hex));
                         }
+                        obj.insert("offender_ips".into(), json!(offender_ips.clone()));
+                        let label = risk
+                            .cheater_lobby
+                            .get("label")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("CLEAN");
                         obj.insert(
-                            "offender_ips".into(),
-                            json!(cached_offender_ips(&state, poll_n).await),
+                            "ai_actions".into(),
+                            json!(ai_advisor::build_firewall_actions(
+                                label,
+                                risk.score,
+                                &risk.phase,
+                                &risk.signals,
+                                &risk.packets,
+                                &offender_ips,
+                            )),
                         );
                     }
                     match state.fw.mitigate_session(&risk_json, kick_spike).await {
@@ -1048,6 +1062,16 @@ async fn feedback_kicked(State(state): State<Arc<AppState>>) -> Json<Value> {
     game_state::store().ingest(&json!({"type": "kick", "source": "user", "note": "kicked from lobby"}));
     let (verdict, score) = session_verdict(&state);
     engine().record_feedback(true, "kicked from lobby by hacker", &verdict, score);
+    post_ai_ops_outcome(
+        &state,
+        json!({
+            "bad_lobby": true,
+            "kicked": true,
+            "note": "kicked from lobby by hacker",
+            "verdict": "kicked",
+        }),
+    )
+    .await;
     let ended_hex = peer_tracker::tracker().end_session();
     let ended = engine().end_active_session();
     state.scorer.lock().mark_lobby_exit();
@@ -1090,9 +1114,55 @@ fn session_verdict(state: &Arc<AppState>) -> (String, f64) {
         .unwrap_or_else(|| ("UNKNOWN".into(), 0.0))
 }
 
+async fn post_ai_ops_outcome(state: &Arc<AppState>, mut extra: Value) {
+    let risk = state.risk.lock().clone();
+    let Some(risk) = risk else {
+        return;
+    };
+    let session_hex = peer_tracker::tracker()
+        .to_json()
+        .get("session_hex")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    if let Some(obj) = extra.as_object_mut() {
+        obj.insert("session_outcome".into(), json!(true));
+        if let Some(hex) = session_hex {
+            obj.insert("session_hex".into(), json!(hex));
+        }
+        for key in [
+            "phase",
+            "score",
+            "cheater_lobby",
+            "signals",
+            "packet_analysis",
+            "inbound_analysis",
+            "ai_actions",
+        ] {
+            if let Some(v) = risk.get(key) {
+                obj.insert(key.into(), v.clone());
+            }
+        }
+    }
+    let fw = state.fw.clone();
+    tokio::spawn(async move {
+        if let Err(e) = fw.ai_ops_outcome(extra).await {
+            tracing::debug!("[ai_ops_outcome] {e}");
+        }
+    });
+}
+
 async fn feedback_post(State(state): State<Arc<AppState>>, Json(body): Json<FeedbackBody>) -> Json<Value> {
     let (verdict, score) = session_verdict(&state);
     engine().record_feedback(body.bad_lobby, &body.note, &verdict, score);
+    post_ai_ops_outcome(
+        &state,
+        json!({
+            "bad_lobby": body.bad_lobby,
+            "note": body.note.chars().take(200).collect::<String>(),
+            "verdict": if body.bad_lobby { "bad" } else { "clean" },
+        }),
+    )
+    .await;
     if body.bad_lobby {
         notify::notify_session_alert(
             "LIKELY",

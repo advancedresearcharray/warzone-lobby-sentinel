@@ -329,6 +329,103 @@ fn active_features(ctx: &AiContext, snapshot: &Value) -> Value {
     })
 }
 
+fn signal_strength(signals: &[(String, f64)], key: &str) -> f64 {
+    signals
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| *v)
+        .unwrap_or(0.0)
+}
+
+fn suspicious_peer_ips(packets: &Value) -> Vec<String> {
+    packets
+        .pointer("/metrics/suspicious_peers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            let mut ips: Vec<String> = arr
+                .iter()
+                .filter_map(|p| p.get("ip").and_then(|v| v.as_str()).map(String::from))
+                .collect();
+            ips.sort();
+            ips.dedup();
+            ips
+        })
+        .unwrap_or_default()
+}
+
+/// Map live session risk to array-firewall ai_ops actions (stay-and-mitigate; never leave lobby).
+pub fn build_firewall_actions(
+    label: &str,
+    score: f64,
+    phase: &str,
+    signals: &[(String, f64)],
+    packets: &Value,
+    offender_ips: &[String],
+) -> Vec<Value> {
+    if phase != "matchmaking" && phase != "in-match" {
+        return Vec::new();
+    }
+
+    let mut out: Vec<Value> = Vec::new();
+    let conf = (score / 100.0).clamp(0.35, 0.95);
+    let peer_attack = signal_strength(signals, "peer_tiny_flood") >= 0.35
+        || signal_strength(signals, "suspicious_peer") >= 0.35
+        || signal_strength(signals, "inbound_attack") >= 0.4;
+
+    let shield_level = if phase == "in-match" {
+        "in-match"
+    } else if label == "LIKELY" || peer_attack {
+        "peer-strict"
+    } else if label == "POSSIBLE" {
+        "console"
+    } else {
+        "normal"
+    };
+
+    if matches!(label, "LIKELY" | "USER_BAD" | "POSSIBLE") || score >= 55.0 || peer_attack {
+        out.push(json!({
+            "type": "shield",
+            "level": shield_level,
+            "reason": "Sentinel cheater mitigation — continue playing with shield active",
+            "confidence": conf,
+            "source": "sentinel_advisor",
+        }));
+    }
+
+    if phase == "matchmaking"
+        && (signal_strength(signals, "server_latency_jitter") >= 0.4
+            || signal_strength(signals, "wan_jitter") >= 0.35)
+    {
+        out.push(json!({
+            "type": "buffer_tune",
+            "profile": "gaming-tight",
+            "reason": "Matchmaking jitter — buffer tuned for playability",
+            "confidence": 0.55,
+            "source": "sentinel_advisor",
+        }));
+    }
+
+    let mut block_ips: Vec<String> = suspicious_peer_ips(packets);
+    for ip in offender_ips {
+        if !block_ips.contains(ip) {
+            block_ips.push(ip.clone());
+        }
+    }
+    block_ips.truncate(4);
+    for ip in block_ips {
+        out.push(json!({
+            "type": "block_peer",
+            "target": ip,
+            "reason": "Sentinel probe peer — blocked while you stay in lobby",
+            "confidence": conf.max(0.72),
+            "ttl_sec": 86400,
+            "source": "sentinel_advisor",
+        }));
+    }
+
+    out
+}
+
 pub fn current_fold(snapshot: &Value, conns: i64, phase: &str, score: f64, mm_delta: Option<f64>) -> [f32; FOLD_DIM] {
     fold_telemetry(
         conns as f32,

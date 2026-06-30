@@ -144,6 +144,10 @@ impl FirewallaClient {
         self.post_json_maybe_wire("/api/v1/gaming/mitigate", body, 2048).await
     }
 
+    pub async fn ai_ops_outcome(&self, body: Value) -> Result<Value, String> {
+        self.post_json("/api/v1/ai-ops/outcome", body).await
+    }
+
     pub async fn peer_blocklist_status(&self) -> Result<Value, String> {
         self.get_json("/api/v1/gaming/peers").await
     }

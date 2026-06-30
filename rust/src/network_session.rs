@@ -1,5 +1,5 @@
 use crate::game_state::store as game_store;
-use crate::ai_advisor::{analyze, AiContext};
+use crate::ai_advisor::{analyze, build_firewall_actions, AiContext};
 use crate::cheater_lobby::{assess, CheaterVerdict};
 use crate::enrich::classify_value;
 use crate::information_flow::{packet_byte_fingerprint, state_from_snapshot, InformationFlowTracker};
@@ -53,6 +53,17 @@ impl SessionRisk {
             "lobby_reputation": self.lobby_reputation,
             "game_state": self.game_state,
             "playlist": game_store().playlist(),
+            "ai_actions": build_firewall_actions(
+                self.cheater_lobby
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("CLEAN"),
+                self.score,
+                &self.phase,
+                &self.signals,
+                &self.packets,
+                &[],
+            ),
         })
     }
 
