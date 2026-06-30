@@ -13,6 +13,7 @@ pub mod network_session;
 pub mod notify;
 pub mod packets;
 pub mod peer_tracker;
+pub mod session_export;
 pub mod traffic;
 
 pub use network_session::{NetworkSessionScorer, SessionRisk};

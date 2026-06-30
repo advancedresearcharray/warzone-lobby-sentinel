@@ -16,6 +16,7 @@ use warzone_sentinel::{
     dashboard, enrich::enrich_snapshot, firewalla::FirewallaClient, game_state,
     learning, learning::engine,
     network_guard::guard, network_session::NetworkSessionScorer, notify, packets, peer_tracker,
+    session_export,
     traffic,
 };
 
@@ -125,6 +126,7 @@ async fn main() {
         .route("/v1/peers/clear", post(peers_clear))
         .route("/v1/peers/sessions", get(peers_sessions))
         .route("/v1/sessions", get(sessions_list))
+        .route("/v1/sessions/formats", get(sessions_formats))
         .route("/v1/sessions/{hex}", get(session_detail))
         .route("/v1/sessions/{hex}/download", get(session_download))
         .route("/v1/peers/shield", post(peers_shield))
@@ -754,16 +756,27 @@ async fn session_detail(Path(hex): Path<String>) -> Result<Json<Value>, (StatusC
         .map_err(|e| (StatusCode::NOT_FOUND, e))
 }
 
-async fn session_download(Path(hex): Path<String>) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let bundle = peer_tracker::tracker()
-        .export_session_bundle(&hex)
-        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
-    let body = serde_json::to_string_pretty(&bundle)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let filename = format!("warzone-session-{hex}.json");
+async fn sessions_formats() -> Json<Value> {
+    Json(session_export::formats_json())
+}
+
+async fn session_download(
+    Path(hex): Path<String>,
+    Query(query): Query<SessionDownloadQuery>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let tracker = peer_tracker::tracker();
+    let detail = tracker.read_session(&hex).map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    let bundle = if session_export::normalize_format(&query.format) == "json" {
+        Some(tracker.export_session_bundle(&hex).map_err(|e| (StatusCode::NOT_FOUND, e))?)
+    } else {
+        None
+    };
+    let (body, ext, mime) = session_export::export_session(&hex, &detail, bundle.as_ref(), &query.format)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let filename = session_export::attachment_name(&hex, &ext);
     Ok((
         [
-            (header::CONTENT_TYPE, "application/json".to_string()),
+            (header::CONTENT_TYPE, mime),
             (
                 header::CONTENT_DISPOSITION,
                 format!("attachment; filename=\"{filename}\""),
@@ -771,6 +784,12 @@ async fn session_download(Path(hex): Path<String>) -> Result<impl IntoResponse, 
         ],
         body,
     ))
+}
+
+#[derive(Deserialize, Default)]
+struct SessionDownloadQuery {
+    #[serde(default)]
+    format: String,
 }
 
 #[derive(Deserialize, Default)]

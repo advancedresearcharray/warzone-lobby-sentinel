@@ -359,7 +359,15 @@
             <option value="">— session —</option>
           </select>
           <button class="btn-ghost" id="btnSessionView" type="button">View</button>
-          <button class="btn-ghost" id="btnSessionDownload" type="button">Download JSON</button>
+          <select id="sessionExportFormat" title="Download format">
+            <option value="json">JSON</option>
+            <option value="csv">CSV</option>
+            <option value="tsv">TSV</option>
+            <option value="txt">TXT</option>
+            <option value="ndjson">NDJSON</option>
+            <option value="md">Markdown</option>
+          </select>
+          <button class="btn-ghost" id="btnSessionDownload" type="button">Download</button>
           <button class="btn-ghost" id="btnSessionLive" type="button" style="display:none">Back to live</button>
         </div>
         <button class="btn-ghost" id="btnClearPeers" type="button">Clear table (save snapshot)</button>
@@ -605,7 +613,17 @@
           <h2 style="margin:0">Session logs</h2>
           <p class="muted" style="margin:0.25rem 0 0;font-size:0.82rem">Saved game sessions under <span class="mono" id="sessionStoreDir">—</span></p>
         </div>
-        <button class="btn-ghost" id="btnSessionsRefresh" type="button">Refresh list</button>
+        <div style="display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center">
+          <select id="sessionLogsExportFormat" title="Download format" style="background:#1a2433;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:0.35rem 0.5rem;font-size:0.78rem">
+            <option value="json">JSON</option>
+            <option value="csv">CSV</option>
+            <option value="tsv">TSV</option>
+            <option value="txt">TXT</option>
+            <option value="ndjson">NDJSON</option>
+            <option value="md">Markdown</option>
+          </select>
+          <button class="btn-ghost" id="btnSessionsRefresh" type="button">Refresh list</button>
+        </div>
       </div>
       <p class="muted" id="sessionLogsMeta" style="margin:0 0 0.65rem;font-size:0.82rem">Loading…</p>
       <table class="mono">
@@ -752,7 +770,7 @@
       if (meta) {
         meta.textContent = j.ok === false
           ? (j.error || 'Failed to load sessions')
-          : `${sessions.length} saved session(s) on disk · click View or Download`;
+          : `${sessions.length} saved session(s) on disk · pick a format and Download (json, csv, tsv, txt, ndjson, md)`;
       }
       if (!body) return;
       body.innerHTML = '';
@@ -793,7 +811,48 @@
       }
     }
 
-    function downloadSessionHex(hex) {
+    function currentExportFormat() {
+      const tab = document.querySelector('.tab.active');
+      const tabName = tab ? tab.dataset.tab : 'overview';
+      if (tabName === 'sessions') {
+        const logsSel = $('sessionLogsExportFormat');
+        if (logsSel && logsSel.value) return logsSel.value;
+      }
+      return ($('sessionExportFormat') || {}).value || 'json';
+    }
+
+    function syncExportFormatSelects(fromId) {
+      const src = $(fromId || 'sessionExportFormat') || $('sessionLogsExportFormat');
+      const fmt = src ? src.value : 'json';
+      ['sessionExportFormat', 'sessionLogsExportFormat'].forEach(id => {
+        const el = $(id);
+        if (el && el.value !== fmt) el.value = fmt;
+      });
+    }
+
+    async function loadExportFormats() {
+      try {
+        const r = await fetch('/v1/sessions/formats');
+        const j = await r.json();
+        const formats = j.formats || [];
+        if (!formats.length) return;
+        ['sessionExportFormat', 'sessionLogsExportFormat'].forEach(id => {
+          const sel = $(id);
+          if (!sel) return;
+          const cur = sel.value || 'json';
+          sel.innerHTML = '';
+          formats.forEach(f => {
+            const opt = document.createElement('option');
+            opt.value = f.id;
+            opt.textContent = `${String(f.id).toUpperCase()} — ${f.label || f.id}`;
+            sel.appendChild(opt);
+          });
+          if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+        });
+      } catch (_) {}
+    }
+
+    function downloadSessionHex(hex, format) {
       if (!hex || hex === '__live__') {
         hex = window.__liveSessionHex;
       }
@@ -801,7 +860,9 @@
         toast('No session selected');
         return;
       }
-      window.location.href = '/v1/sessions/' + encodeURIComponent(hex) + '/download';
+      const fmt = format || currentExportFormat();
+      window.location.href = '/v1/sessions/' + encodeURIComponent(hex) + '/download?format=' + encodeURIComponent(fmt);
+      toast('Downloading ' + fmt.toUpperCase() + ' for ' + hex.slice(0, 8) + '…');
     }
 
     async function viewSessionHex(hex) {
@@ -888,6 +949,7 @@
       if (name === 'traffic') loadTraffic(trafficDir);
       if (name === 'connections') loadConnectionsDb();
       if (name === 'sessions' && !sessionLogsLoaded) loadSessionLogs();
+      syncExportFormatSelects();
     }
 
     const selectedConnIps = new Set();
@@ -1837,7 +1899,13 @@
     const fw = $('fwLink');
     if (fw) fw.href = `http://${location.hostname}:8090/`;
 
+    ['sessionExportFormat', 'sessionLogsExportFormat'].forEach(id => {
+      const el = $(id);
+      if (el) el.addEventListener('change', () => syncExportFormatSelects(id));
+    });
+
     refresh();
+    loadExportFormats();
     loadSessionLogs();
     setInterval(refresh, 4000);
   </script>
