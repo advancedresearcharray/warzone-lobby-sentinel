@@ -148,6 +148,10 @@ impl FirewallaClient {
         self.post_json("/api/v1/ai-ops/outcome", body).await
     }
 
+    pub async fn ai_ops_playability(&self) -> Result<Value, String> {
+        self.get_json("/api/v1/ai-ops/playability").await
+    }
+
     pub async fn peer_blocklist_status(&self) -> Result<Value, String> {
         self.get_json("/api/v1/gaming/peers").await
     }

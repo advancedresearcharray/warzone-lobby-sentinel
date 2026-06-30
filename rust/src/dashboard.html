@@ -398,6 +398,12 @@
       <ul class="verdict-reasons" id="verdictReasons"></ul>
       <div class="defense-note" id="defenseStatus"></div>
       <div class="rec" id="recommendation"></div>
+      <div class="playability-card" id="playabilityCard" style="margin-top:.75rem;padding:.75rem;border-radius:8px;background:rgba(0,0,0,.25)">
+        <div style="font-size:.75rem;opacity:.7;text-transform:uppercase;letter-spacing:.05em">Stay &amp; mitigate</div>
+        <div id="playabilityHeadline" style="font-weight:600;margin:.35rem 0">Waiting for autopilot…</div>
+        <div id="playabilityScore" class="sub">Playability —</div>
+        <ul id="playabilityMitigations" class="sub" style="margin:.35rem 0 0;padding-left:1.1rem"></ul>
+      </div>
     </section>
 
     <section class="card">
@@ -1428,6 +1434,22 @@
         || (sess.network_guard && sess.network_guard.mitigation)
         || '';
       $('recommendation').textContent = sess.recommendation || '';
+
+      const play = d.playability || {};
+      const pScore = play.playability_score;
+      $('playabilityHeadline').textContent = play.headline || 'Stay in lobby — autopilot absorbs cheater probes.';
+      $('playabilityScore').textContent = pScore != null
+        ? `Playability ${Number(pScore).toFixed(0)}/100 · ${play.band || '—'} · ${(play.posture || 'stay_and_mitigate').replace(/_/g, ' ')}`
+        : 'Playability — waiting for array-firewall autopilot';
+      const mit = play.mitigations_active || [];
+      $('playabilityMitigations').innerHTML = mit.length
+        ? mit.map(m => `<li>${m}</li>`).join('')
+        : '<li>Monitoring — defenses ready if probes appear</li>';
+      const pc = $('playabilityCard');
+      if (pc) {
+        pc.style.borderLeft = pScore != null && pScore < 48 ? '3px solid #e74c3c'
+          : (pScore != null && pScore < 72 ? '3px solid #f39c12' : '3px solid #2ecc71');
+      }
 
       const ai = sess.ai || {};
       $('aiSummary').textContent = ai.summary || 'Waiting for gaming session…';

@@ -521,6 +521,7 @@ async fn dashboard_data(State(state): State<Arc<AppState>>) -> Json<Value> {
     let last_auto_alert = state.last_auto_alert.lock().clone();
     let network_guard = state.network_guard.lock().clone();
     let restrictions = cached_peer_restrictions(&state).await;
+    let playability = state.fw.ai_ops_playability().await.unwrap_or(json!({}));
     let learning = tokio::task::spawn_blocking(|| engine().insights())
         .await
         .unwrap_or(json!({}));
@@ -545,6 +546,7 @@ async fn dashboard_data(State(state): State<Arc<AppState>>) -> Json<Value> {
         "last_auto_alert": last_auto_alert,
         "peer_tracker": peer_tracker,
         "peer_restrictions": restrictions,
+        "playability": playability,
     }))
 }
 
