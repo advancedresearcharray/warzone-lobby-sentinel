@@ -4,6 +4,9 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static LAST_XBOX_NOTIFY: Mutex<f64> = Mutex::new(0.0);
+static LAST_NTFY_COALESCE: Mutex<(String, f64)> = Mutex::new((String::new(), 0.0));
+
+const NTFY_COALESCE_SEC: f64 = 120.0;
 
 pub fn alert_status() -> Value {
     json!({
@@ -112,6 +115,25 @@ pub async fn notify_session_alert(
     cheater_lobby: &Value,
     force: bool,
 ) -> bool {
+    let band = if score >= 0.75 {
+        "high"
+    } else if score >= 0.45 {
+        "med"
+    } else {
+        "low"
+    };
+    let coalesce_key = format!("{phase}:{band}:{level}");
+    if !force {
+        let now = now_secs();
+        if let Ok(guard) = LAST_NTFY_COALESCE.lock() {
+            let last_key = guard.0.clone();
+            let last_ts = guard.1;
+            if last_key == coalesce_key && (now - last_ts) < NTFY_COALESCE_SEC {
+                tracing::debug!("[ntfy] coalesced duplicate alert {coalesce_key}");
+                return false;
+            }
+        }
+    }
     let label = cheater_lobby
         .get("label")
         .and_then(|v| v.as_str())
@@ -142,6 +164,11 @@ pub async fn notify_session_alert(
     let body = lines.join("\n");
     let phone = ntfy_notify(&title, &body).await;
     let xbox = xbox_notify_session(level, score, phase, game, recommendation, anomalies, force).await;
+    if phone || xbox {
+        if let Ok(mut guard) = LAST_NTFY_COALESCE.lock() {
+            *guard = (coalesce_key, now_secs());
+        }
+    }
     phone || xbox
 }
 
