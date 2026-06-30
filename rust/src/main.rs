@@ -297,6 +297,15 @@ async fn run_poll_loop(state: Arc<AppState>, interval: f64, idle_interval: f64) 
                                         r.get("added").or(r.get("total"))
                                     );
                                 }
+                                if let Ok(sr) = fw
+                                    .block_subnets_from_ips(&ips, "vultr_vps_game_peer")
+                                    .await
+                                {
+                                    tracing::info!(
+                                        "[subnet-block] mesh /24 blocks in {phase}: {:?}",
+                                        sr.get("results").and_then(|v| v.as_array()).map(|a| a.len())
+                                    );
+                                }
                                 let _ = fw.sync_shield_peers("peer-strict", &ips).await;
                             });
                         }

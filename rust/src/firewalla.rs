@@ -164,6 +164,29 @@ impl FirewallaClient {
         self.post_json("/api/v1/gaming/peers/block", body).await
     }
 
+    pub async fn subnet_blocklist_status(&self) -> Result<Value, String> {
+        self.get_json("/api/v1/subnets").await
+    }
+
+    pub async fn block_subnets_from_ips(
+        &self,
+        ips: &[String],
+        reason: &str,
+    ) -> Result<Value, String> {
+        self.post_json(
+            "/api/v1/subnets/block",
+            json!({
+                "ips": ips,
+                "reason": reason,
+            }),
+        )
+        .await
+    }
+
+    pub async fn refresh_subnet_providers(&self) -> Result<Value, String> {
+        self.post_json("/api/v1/subnets/refresh-providers", json!({})).await
+    }
+
     pub async fn remove_peers(&self, ips: &[String]) -> Result<Value, String> {
         self.post_json(
             "/api/v1/gaming/peers/remove",
