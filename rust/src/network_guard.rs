@@ -448,7 +448,7 @@ impl NetworkGuard {
                     "Drops inbound UDP/TCP ≤79 bytes (kick probes); normal Warzone packets pass"
                 },
             },
-            "xbox_ip": std::env::var("WZ_XBOX_IP").unwrap_or_else(|_| "192.168.167.65".into()),
+            "xbox_ip": std::env::var("WZ_XBOX_IP").unwrap_or_else(|_| "203.0.113.11".into()),
             "path": {
                 "type": "wired-moca",
                 "label": std::env::var("WZ_XBOX_PATH_LABEL")

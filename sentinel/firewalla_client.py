@@ -44,7 +44,7 @@ def _load_token() -> str:
 
 def fetch_snapshot_firewalla(xbox_ip: str | None = None) -> dict[str, Any]:
     """Run gaming-snapshot.sh on Firewalla via LAN API — works from any LAN CT."""
-    base = os.environ.get("WZ_FIREWALLA_API_URL", "http://192.168.167.1:9378").rstrip("/")
+    base = os.environ.get("WZ_ARRAY_FW_API_URL", os.environ.get("WZ_FIREWALLA_API_URL", "http://127.0.0.1:8090")).rstrip("/")
     token = _load_token()
     if not token:
         raise RuntimeError("WZ_FIREWALLA_API_TOKEN not configured")
@@ -76,7 +76,7 @@ def fetch_ai_insights_dashboard(base_url: str) -> dict[str, Any]:
 
 
 def probe_firewalla() -> bool:
-    base = os.environ.get("WZ_FIREWALLA_API_URL", "http://192.168.167.1:9378").rstrip("/")
+    base = os.environ.get("WZ_ARRAY_FW_API_URL", os.environ.get("WZ_FIREWALLA_API_URL", "http://127.0.0.1:8090")).rstrip("/")
     try:
         data = _get(f"{base}/api/health", timeout=3.0)
         return bool(data.get("ok"))

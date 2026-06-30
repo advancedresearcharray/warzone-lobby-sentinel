@@ -1194,7 +1194,7 @@
       const xboxTel = tel.xbox || {};
       $('xboxPath').textContent = xboxTel.pathLabel || ng.path?.label || 'Wired · MoCA';
 
-      const xboxIp = xboxTel.ip || ng.xbox_ip || '192.168.167.65';
+      const xboxIp = xboxTel.ip || ng.xbox_ip || '203.0.113.11';
       let xboxLan = xboxTel.lanLatencyMs;
       if (xboxLan == null && Array.isArray(tel.connections?.items)) {
         const hit = tel.connections.items.find(c => c.ip === xboxIp);

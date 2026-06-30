@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Deploy Warzone Lobby Sentinel to a Proxmox LXC (default: CT941 on node9).
+# Deploy Warzone Lobby Sentinel to an existing Proxmox LXC.
 #
-# Full provision + deploy (Xbox):
-#   ./deploy-node9.sh
-#
-# Remote Proxmox node:
-#   PROXMOX_NODE=root@192.168.167.9 WZ_SENTINEL_CTID=941 ./deploy-to-lxc.sh
+#   export PROXMOX_NODE=pve-primary.example
+#   export WZ_SENTINEL_CTID=101
+#   ./deploy-to-lxc.sh
 #
 set -euo pipefail
 
-CTID="${WZ_SENTINEL_CTID:-941}"
-PROXMOX_NODE="${PROXMOX_NODE:-192.168.167.9}"
+: "${WZ_SENTINEL_CTID:?Set WZ_SENTINEL_CTID}"
+: "${PROXMOX_NODE:?Set PROXMOX_NODE}"
+CTID="${WZ_SENTINEL_CTID}"
+PROXMOX_NODE="${PROXMOX_NODE}"
 PROXMOX_SSH="${PROXMOX_NODE#root@}"
 PROXMOX_SSH="${PROXMOX_SSH#*@}"
 PROXMOX_REMOTE="root@${PROXMOX_SSH}"
@@ -133,7 +133,7 @@ fi
 
 PORT="${WZ_INGEST_PORT:-8098}"
 echo ""
-echo "Warzone Lobby Sentinel deployed to CT${CTID} on node9 (autonomous Xbox)"
+echo "Warzone Lobby Sentinel deployed to CT${CTID} on ${PROXMOX_SSH}"
 echo "  status:  http://${IP:-<CT-IP>}:${PORT}/v1/status"
 echo "  health:  http://${IP:-<CT-IP>}:${PORT}/health"
 echo "  logs:    ssh ${PROXMOX_REMOTE} 'pct exec ${CTID} -- journalctl -u warzone-lobby-sentinel -f'"

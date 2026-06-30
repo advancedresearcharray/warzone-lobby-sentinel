@@ -197,7 +197,7 @@ fn classify_local_ip(ip: &str) -> Option<String> {
     if !is_private_ip(ip) {
         return None;
     }
-    if ip == "192.168.167.1" {
+    if ip == "192.0.2.1" {
         return Some("lan-gateway".into());
     }
     Some("lan-local".into())
@@ -888,7 +888,7 @@ mod tests {
 
     #[test]
     fn gateway_is_lan_not_unknown() {
-        assert_eq!(classify_endpoint("192.168.167.1:52322", ""), "lan-gateway");
+        assert_eq!(classify_endpoint("192.0.2.1:52322", ""), "lan-gateway");
     }
 
     #[test]

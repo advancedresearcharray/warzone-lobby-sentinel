@@ -14,11 +14,11 @@ impl FirewallaClient {
     pub fn from_env() -> Result<Self, String> {
         let base = std::env::var("WZ_ARRAY_FW_API_URL")
             .or_else(|_| std::env::var("WZ_FIREWALLA_API_URL"))
-            .unwrap_or_else(|_| "http://192.168.167.1:8090".into())
+            .unwrap_or_else(|_| "http://127.0.0.1:8090".into())
             .trim_end_matches('/')
             .to_string();
         let token = load_token()?;
-        let xbox_ip = std::env::var("WZ_XBOX_IP").unwrap_or_else(|_| "192.168.167.65".into());
+        let xbox_ip = std::env::var("WZ_XBOX_IP").unwrap_or_else(|_| "203.0.113.11".into());
         let http = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()

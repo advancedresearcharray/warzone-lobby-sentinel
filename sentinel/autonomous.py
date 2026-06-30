@@ -57,7 +57,7 @@ def _log_alert(risk: SessionRisk) -> None:
 
 def run_poll_loop() -> None:
     interval = float(os.environ.get("WZ_POLL_INTERVAL_SEC", "4"))
-    api = os.environ.get("WZ_FIREWALLA_API_URL", "http://192.168.167.1:9378")
+    api = os.environ.get("WZ_ARRAY_FW_API_URL", os.environ.get("WZ_FIREWALLA_API_URL", "http://127.0.0.1:8090"))
     STATE.source = f"firewalla:{api}" if probe_firewalla() else "unconfigured"
     print(f"Autonomous Xbox mode — polling Firewalla {api} every {interval}s", flush=True)
     if alert_notify.status()["phone_push"] or alert_notify.status()["xbox_live"]:

@@ -58,7 +58,7 @@ def _is_private_ip(ip: str) -> bool:
 def _classify_local_ip(ip: str) -> str | None:
     if not ip or not _is_private_ip(ip):
         return None
-    if ip == "192.168.167.1":
+    if ip == "192.0.2.1":
         return "lan-gateway"
     return "lan-local"
 

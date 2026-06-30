@@ -40,7 +40,7 @@ function emitPrefire(player, beforeLos) {
 
 function appendEvent(ev) {
   // POST to LXC ingest (replace CT IP):
-  // fetch('http://192.168.167.x:8098/v1/events', {
+  // fetch('http://192.0.2.x:8098/v1/events', {
   //   method: 'POST',
   //   headers: { 'Content-Type': 'application/json' },
   //   body: JSON.stringify(ev),
